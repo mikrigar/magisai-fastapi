@@ -371,17 +371,20 @@ ENHANCED ANSWER:"""
     except Exception as e:
         logger.error(f"❌ Answer generation failed: {e}")
         
-        # Enhanced fallback with citations
-        fallback = f"Based on authoritative Catholic theological sources, particularly from {sources[0].agent.replace('_', ' ')}"
-        
-        if sources[0].namedPersons:
-            fallback += f" (referencing {', '.join(sources[0].namedPersons[:2])})"
-        
-        fallback += f", this question involves important theological considerations. "
-        fallback += f"The sources indicate specific insights from {len(sources)} relevant documents including {sources[0].source}. "
-        fallback += "Please try your question again for a detailed response with full citations."
-        
-        return fallback
+       # Enhanced fallback with citations
+fallback = f"Based on authoritative Catholic theological sources, particularly from {sources[0].agent.replace('_', ' ')}"
+
+if sources[0].namedPersons:
+    fallback += f" (referencing {', '.join(sources[0].namedPersons[:2])})"
+
+if sources[0].hasDetailedContent and sources[0].contentType:
+    fallback += f" with {sources[0].contentType.replace('_', ' ')} content"
+
+fallback += f", this question involves important theological considerations. "
+fallback += f"The sources indicate specific insights from {len(sources)} relevant documents including {sources[0].source}. "
+fallback += "Please try your question again for a detailed response with full citations."
+
+return fallback
 
 @app.post("/ask-simple", response_model=SimplifiedResponse)
 async def simplified_query(request: SimplifiedQueryRequest):
