@@ -276,7 +276,7 @@ async def generate_enhanced_answer(question: str, sources: List[EnhancedSource],
     if not sources:
         return "I apologize, but I couldn't find relevant information to answer your question."
     
-    # Build enhanced context with proof and citation information
+    # Build enhanced context with detailed content information
     context_parts = []
     citation_map = {}
     
@@ -286,7 +286,7 @@ async def generate_enhanced_answer(question: str, sources: List[EnhancedSource],
             "source": source.source,
             "agent": source.agent,
             "persons": source.namedPersons,
-            "proof_type": source.proofType
+            "content_type": source.contentType
         }
         
         # Enhanced context formatting
@@ -330,7 +330,7 @@ AUTHORITATIVE SOURCES:
 {context}
 
 INSTRUCTIONS:
-- Provide a comprehensive, theologically sound answer
+- Provide a comprehensive, sound answer
 - Include ALL detailed breakdowns, explanations, and structured content from sources
 - Preserve step-by-step explanations, numbered lists, and conceptual frameworks
 - Include specific details from proofs, arguments, and analyses when available
@@ -348,15 +348,15 @@ ENHANCED ANSWER:"""
             response = await client.post(
                 RUNPOD_URL,
                 json={
-                    "model": "mistralai/Mistral-Small-Instruct-2409",  # Using Mistral-Small 3.1
+                    "model": "mistralai/Mistral-Small-Instruct-2409",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 1200,  # Increased for detailed responses
-                    "temperature": 0.3,  # Lower for accuracy
+                    "max_tokens": 1200,
+                    "temperature": 0.3,
                     "top_p": 0.9,
                     "stream": False
                 },
                 headers={"Authorization": f"Bearer {RUNPOD_KEY}"},
-                timeout=45.0  # Longer timeout for detailed responses
+                timeout=45.0
             )
             
             if response.status_code == 200:
@@ -371,20 +371,20 @@ ENHANCED ANSWER:"""
     except Exception as e:
         logger.error(f"❌ Answer generation failed: {e}")
         
-       # Enhanced fallback with citations
-fallback = f"Based on authoritative Catholic theological sources, particularly from {sources[0].agent.replace('_', ' ')}"
-
-if sources[0].namedPersons:
-    fallback += f" (referencing {', '.join(sources[0].namedPersons[:2])})"
-
-if sources[0].hasDetailedContent and sources[0].contentType:
-    fallback += f" with {sources[0].contentType.replace('_', ' ')} content"
-
-fallback += f", this question involves important theological considerations. "
-fallback += f"The sources indicate specific insights from {len(sources)} relevant documents including {sources[0].source}. "
-fallback += "Please try your question again for a detailed response with full citations."
-
-return fallback
+        # Enhanced fallback with proper attributes
+        fallback = f"Based on authoritative Catholic theological sources, particularly from {sources[0].agent.replace('_', ' ')}"
+        
+        if sources[0].namedPersons:
+            fallback += f" (referencing {', '.join(sources[0].namedPersons[:2])})"
+        
+        if sources[0].hasDetailedContent and sources[0].contentType:
+            fallback += f" with {sources[0].contentType.replace('_', ' ')} content"
+        
+        fallback += f", this question involves important theological considerations. "
+        fallback += f"The sources indicate specific insights from {len(sources)} relevant documents including {sources[0].source}. "
+        fallback += "Please try your question again for a detailed response with full citations."
+        
+        return fallback
 
 @app.post("/ask-simple", response_model=SimplifiedResponse)
 async def simplified_query(request: SimplifiedQueryRequest):
@@ -399,7 +399,7 @@ async def simplified_query(request: SimplifiedQueryRequest):
         
         if not sources:
             return SimplifiedResponse(
-                answer="I apologize, but I couldn't find relevant information to answer your question. Please try rephrasing or asking about a different theological topic.",
+                answer="I apologize, but I couldn't find relevant information to answer your question. Please try rephrasing or asking about a different topic on faith, reason, science, philosophy, scripture, or morality.",
                 sources=[],
                 confidence=0.0,
                 processingTime=time.time() - start_time,
