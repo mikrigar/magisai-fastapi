@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MagisAI FastAPI Gateway
-Connects Weaviate → RunPod Mistral-Nemo → Response
+Enhanced MagisAI FastAPI - Multi-Agent Processing
+Handles both simple and complex questions with intelligent agent routing
 """
 
 from fastapi import FastAPI, HTTPException
@@ -9,37 +9,29 @@ from pydantic import BaseModel
 import weaviate
 from weaviate.classes.init import Auth
 import httpx
+import asyncio
 import logging
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from dotenv import load_dotenv
+import time
 
-# Load environment variables from .env file
 load_dotenv()
 
-app = FastAPI(title="MagisAI Gateway", version="1.0.0")
+app = FastAPI(title="Enhanced MagisAI Gateway", version="2.0.0")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration from .env file
+# Configuration
 WEAVIATE_URL = os.getenv("WEAVIATE_URL")
 WEAVIATE_KEY = os.getenv("WEAVIATE_KEY")
 RUNPOD_URL = os.getenv("RUNPOD_URL")
 RUNPOD_KEY = os.getenv("RUNPOD_KEY")
 
-# Debug: Print config (remove API keys from logs)
-logger.info(f"🔧 Weaviate URL: {WEAVIATE_URL}")
-logger.info(f"🔧 Weaviate Key: {'***' + WEAVIATE_KEY[-4:] if WEAVIATE_KEY else 'NOT SET'}")
-logger.info(f"🔧 RunPod URL: {RUNPOD_URL}")
-logger.info(f"🔧 RunPod Key: {'***' + RUNPOD_KEY[-4:] if RUNPOD_KEY else 'NOT SET'}")
-
 # Initialize Weaviate client
 try:
-    if not WEAVIATE_URL or not WEAVIATE_KEY:
-        raise ValueError("WEAVIATE_URL and WEAVIATE_KEY must be set in .env file")
-        
     weaviate_client = weaviate.connect_to_weaviate_cloud(
         cluster_url=WEAVIATE_URL,
         auth_credentials=Auth.api_key(WEAVIATE_KEY)
@@ -49,240 +41,376 @@ except Exception as e:
     logger.error(f"❌ Weaviate connection failed: {e}")
     weaviate_client = None
 
-class QueryRequest(BaseModel):
+# Enhanced request models
+class SubQuestion(BaseModel):
     question: str
-    max_chunks: int = 5
-    agent_filter: Optional[str] = None
+    suggestedAgents: List[str]
+    primaryAgent: Optional[str] = None
 
-class QueryResponse(BaseModel):
+class Decomposition(BaseModel):
+    isComplex: bool
+    subQuestions: List[SubQuestion]
+    synthesisStrategy: Optional[str] = "comprehensive"
+
+class EnhancedQueryRequest(BaseModel):
+    question: str
+    user: str
+    decomposition: Optional[Decomposition] = None
+    maxChunks: Optional[int] = 5
+    responseDepth: Optional[str] = "detailed"
+
+class AgentResponse(BaseModel):
+    agent: str
+    subQuestion: str
     answer: str
     sources: List[Dict]
     confidence: float
-    agent_used: str
+    processingTime: float
 
-class HealthResponse(BaseModel):
-    status: str
-    weaviate_connected: bool
-    runpod_available: bool
+class EnhancedQueryResponse(BaseModel):
+    answer: str
+    sources: List[Dict]
+    agentResponses: List[AgentResponse]
+    confidence: float
+    processingTime: float
+    synthesisStrategy: str
+    agentsUsed: List[str]
 
-@app.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Health check endpoint - simplified for debugging"""
-    logger.info("🏥 Health check requested")
-    
-    # Quick Weaviate check without hanging
-    weaviate_ok = False
-    try:
-        weaviate_ok = weaviate_client is not None and weaviate_client.is_ready()
-        logger.info(f"Weaviate status: {weaviate_ok}")
-    except Exception as e:
-        logger.error(f"Weaviate check failed: {e}")
-        weaviate_ok = False
-    
-    # Skip RunPod check for now to avoid timeouts
-    runpod_ok = bool(RUNPOD_URL and RUNPOD_KEY)
-    logger.info(f"RunPod configured: {runpod_ok}")
-    
-    result = HealthResponse(
-        status="healthy" if weaviate_ok else "degraded",
-        weaviate_connected=weaviate_ok,
-        runpod_available=runpod_ok
-    )
-    
-    logger.info(f"Health check result: {result}")
-    return result
+# Legacy request model for backward compatibility
+class SimpleQueryRequest(BaseModel):
+    question: str
+    user: str
 
-def detect_theological_intent(question: str) -> Dict[str, any]:
-    """Detect which theological domain(s) the question relates to"""
-    question_lower = question.lower()
-    
-    intent_keywords = {
-        "Suffering_and_Evil": ["suffering", "evil", "pain", "why god allow", "problem of evil"],
-        "Evidence_of_Gods_Existence": ["god exist", "proof", "evidence", "atheism", "creation"],
-        "Christian_Theology": ["trinity", "jesus", "christ", "incarnation", "salvation"],
-        "Happiness_and_Suffering": ["happiness", "joy", "levels", "purpose", "meaning"],
-        "Prayer_and_Spiritual_Life": ["prayer", "spiritual", "contemplation", "mysticism"],
-        "Moral_and_Social_Teaching": ["ethics", "moral", "conscience", "social", "teaching"],
-        "Evidence_of_life_after_death_and_a_soul": ["soul", "afterlife", "death", "consciousness"],
-        "Science_and_Faith": ["science", "evolution", "big bang", "faith", "reason"]
-    }
-    
-    detected_agents = []
-    confidence_scores = {}
-    
-    for agent, keywords in intent_keywords.items():
-        score = sum(1 for keyword in keywords if keyword in question_lower)
-        if score > 0:
-            detected_agents.append(agent)
-            confidence_scores[agent] = score
-    
-    primary_agent = max(confidence_scores, key=confidence_scores.get) if confidence_scores else "Christian_Theology"
-    
+@app.get("/")
+async def root():
     return {
-        "primary_agent": primary_agent,
-        "all_agents": detected_agents,
-        "confidence": confidence_scores.get(primary_agent, 0.1)
+        "service": "Enhanced MagisAI Gateway",
+        "version": "2.0.0",
+        "capabilities": ["multi-agent processing", "question decomposition", "intelligent synthesis"],
+        "endpoints": {
+            "ask": "/ask (POST) - Legacy single-agent endpoint",
+            "ask-enhanced": "/ask-enhanced (POST) - Multi-agent endpoint",
+            "health": "/health"
+        }
     }
 
-def retrieve_context(question: str, max_chunks: int = 5, agent_filter: str = None) -> List[Dict]:
-    """Retrieve relevant chunks from Weaviate"""
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "weaviate_connected": weaviate_client is not None and weaviate_client.is_ready(),
+        "runpod_configured": bool(RUNPOD_URL and RUNPOD_KEY),
+        "capabilities": ["multi-agent", "parallel-processing", "intelligent-synthesis"]
+    }
+
+async def query_agent_with_context(question: str, agent_filter: str, max_chunks: int = 5) -> Dict[str, Any]:
+    """Query specific agent with Weaviate context retrieval"""
+    
     if not weaviate_client:
         raise HTTPException(status_code=503, detail="Weaviate not connected")
+    
+    start_time = time.time()
     
     try:
         collection = weaviate_client.collections.get("MagisChunk")
         
-        # Simple search without filtering for now (we'll add filtering back later)
+        # Search with agent filtering
         response = collection.query.near_text(
             query=question,
             limit=max_chunks,
-            return_metadata=["distance"]
+            return_metadata=["distance"],
+            where={
+                "operator": "Or",
+                "operands": [
+                    {"path": ["agent1"], "operator": "Equal", "valueString": agent_filter},
+                    {"path": ["agent2"], "operator": "Equal", "valueString": agent_filter}
+                ]
+            }
         )
         
+        # Format chunks
         chunks = []
         for obj in response.objects:
             chunks.append({
                 "content": obj.properties.get("content", ""),
                 "agent": obj.properties.get("agent1", "Unknown"),
-                "topics": obj.properties.get("agent1CoreTopics", []),
                 "source": obj.properties.get("sourceFile", "Unknown"),
-                "human_id": obj.properties.get("humanId", ""),
                 "distance": obj.metadata.distance if hasattr(obj.metadata, 'distance') else 1.0
             })
         
-        logger.info(f"✅ Retrieved {len(chunks)} chunks for query: {question[:50]}...")
-        return chunks
+        # Generate answer with RunPod Mistral
+        answer = await generate_agent_answer(question, chunks, agent_filter)
+        
+        # Calculate confidence
+        avg_distance = sum(chunk["distance"] for chunk in chunks) / len(chunks) if chunks else 1.0
+        confidence = max(0.0, 1.0 - avg_distance)
+        
+        processing_time = time.time() - start_time
+        
+        return {
+            "agent": agent_filter,
+            "question": question,
+            "answer": answer,
+            "sources": chunks,
+            "confidence": confidence,
+            "processing_time": processing_time,
+            "chunks_used": len(chunks)
+        }
         
     except Exception as e:
-        logger.error(f"❌ Retrieval failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Retrieval error: {str(e)}")
+        logger.error(f"❌ Agent query failed for {agent_filter}: {e}")
+        return {
+            "agent": agent_filter,
+            "question": question,
+            "answer": f"Unable to process question with {agent_filter.replace('_', ' ')} agent due to technical difficulties.",
+            "sources": [],
+            "confidence": 0.0,
+            "processing_time": time.time() - start_time,
+            "error": str(e)
+        }
 
-async def generate_answer(question: str, context_chunks: List[Dict]) -> str:
-    """Generate answer using RunPod Mistral-Nemo"""
+async def generate_agent_answer(question: str, chunks: List[Dict], agent: str) -> str:
+    """Generate agent-specific answer using RunPod Mistral"""
     
-    # Build context prompt
+    if not chunks:
+        return f"I apologize, but I couldn't find relevant information from {agent.replace('_', ' ')} sources to answer your question."
+    
+    # Build context
     context_parts = []
-    for i, chunk in enumerate(context_chunks, 1):
-        context_parts.append(
-            f"[Source {i} - {chunk['agent']}: {chunk['source']}]\n{chunk['content']}\n"
-        )
+    for i, chunk in enumerate(chunks, 1):
+        context_parts.append(f"[Source {i}]: {chunk['content']}")
     
-    context = "\n".join(context_parts)
+    context = "\n\n".join(context_parts)
     
-    # Mistral-Nemo optimized prompt
-    prompt = f"""<s>[INST] You are MagisAI, a Catholic theology assistant. Answer the user's question accurately and concisely using the authoritative sources provided.
+    # Agent-specific prompt
+    agent_name = agent.replace("_", " ")
+    prompt = f"""You are a Catholic theology expert specializing in {agent_name}. Answer the user's question using the provided sources.
 
-Context Sources:
+Sources from {agent_name}:
 {context}
 
-User Question: {question}
+Question: {question}
 
-Provide a clear, theologically sound answer based on the sources. Be concise but thorough. If the sources don't contain relevant information, say so honestly. [/INST]"""
+Provide a clear, theologically sound answer based on these {agent_name} sources. If the sources don't fully address the question, acknowledge the limitations while providing what insight you can."""
 
     try:
-        if not RUNPOD_URL or not RUNPOD_KEY:
-            raise ValueError("RunPod credentials not configured")
-            
         async with httpx.AsyncClient() as client:
-            # RunPod Mistral-Nemo payload for chat completions
-            payload = {
-                "model": "mistralai/Mistral-Nemo-Instruct-2407",
-                "messages": [
-                    {
-                        "role": "user", 
-                        "content": prompt
-                    }
-                ],
-                "max_tokens": 500,
-                "temperature": 0.7,
-                "top_p": 0.9
-            }
-            
             response = await client.post(
-                RUNPOD_URL,  # Use the full URL as-is
-                json=payload,
+                RUNPOD_URL,
+                json={
+                    "model": "mistral-nemo",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 400,
+                    "temperature": 0.7,
+                    "stream": False
+                },
                 headers={"Authorization": f"Bearer {RUNPOD_KEY}"},
                 timeout=30.0
             )
             
             if response.status_code == 200:
                 result = response.json()
-                # Extract from OpenAI-style response
-                choices = result.get("choices", [])
-                if choices:
-                    answer = choices[0].get("message", {}).get("content", "").strip()
-                    return answer
-                else:
-                    return "No response generated"
-            else:
-                raise Exception(f"RunPod error: {response.status_code} - {response.text}")
-                
+                if result.get("choices") and result["choices"][0].get("message"):
+                    return result["choices"][0]["message"]["content"].strip()
+                elif result.get("response"):
+                    return result["response"].strip()
+            
+            raise Exception(f"RunPod error: {response.status_code}")
+            
     except Exception as e:
-        logger.error(f"❌ Mistral generation failed: {e}")
-        # Fallback response
-        return f"I apologize, but I'm having difficulty generating a response at the moment. However, I found relevant information in {len(context_chunks)} sources related to your question about '{question}'. The sources indicate this is an important theological matter. Please try again shortly."
+        logger.error(f"❌ RunPod generation failed: {e}")
+        return f"Based on {len(chunks)} sources from {agent_name}, this question relates to important theological concepts. However, I'm experiencing technical difficulties generating a detailed response. Please try again shortly."
 
-@app.post("/query", response_model=QueryResponse)
-async def process_query(request: QueryRequest):
-    """Main query processing endpoint"""
+async def synthesize_multi_agent_responses(agent_responses: List[Dict], original_question: str, strategy: str = "comprehensive") -> str:
+    """Synthesize multiple agent responses into unified answer"""
+    
+    if not agent_responses:
+        return "I apologize, but I couldn't generate a response to your question."
+    
+    if len(agent_responses) == 1:
+        return agent_responses[0]["answer"]
+    
+    # Prepare synthesis context
+    agent_answers = []
+    for resp in agent_responses:
+        agent_name = resp["agent"].replace("_", " ")
+        agent_answers.append(f"**{agent_name} Perspective:**\n{resp['answer']}")
+    
+    combined_context = "\n\n".join(agent_answers)
+    
+    synthesis_prompt = f"""You are MagisAI, a Catholic theology assistant. Synthesize the following expert perspectives into one comprehensive, coherent answer.
+
+Original Question: {original_question}
+
+Expert Perspectives:
+{combined_context}
+
+Synthesize these perspectives into a unified, comprehensive answer that:
+1. Addresses the original question directly
+2. Integrates insights from all perspectives
+3. Maintains theological accuracy
+4. Presents a coherent Catholic understanding
+5. Is concise but thorough
+
+Unified Answer:"""
+
     try:
-        logger.info(f"🔍 Processing query: {request.question}")
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                RUNPOD_URL,
+                json={
+                    "model": "mistral-nemo",
+                    "messages": [{"role": "user", "content": synthesis_prompt}],
+                    "max_tokens": 600,
+                    "temperature": 0.6,
+                    "stream": False
+                },
+                headers={"Authorization": f"Bearer {RUNPOD_KEY}"},
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("choices") and result["choices"][0].get("message"):
+                    return result["choices"][0]["message"]["content"].strip()
+                elif result.get("response"):
+                    return result["response"].strip()
         
-        # Detect intent
-        intent = detect_theological_intent(request.question)
-        agent_filter = request.agent_filter or intent["primary_agent"]
+        # Fallback synthesis
+        return f"Based on multiple theological perspectives including {', '.join([r['agent'].replace('_', ' ') for r in agent_responses])}, here are the key insights:\n\n" + "\n\n".join([resp["answer"] for resp in agent_responses[:2]])
         
-        # Retrieve context
-        chunks = retrieve_context(
-            question=request.question,
-            max_chunks=request.max_chunks,
-            agent_filter=agent_filter
-        )
-        
-        if not chunks:
-            return QueryResponse(
-                answer="I apologize, but I couldn't find relevant information to answer your question. Please try rephrasing or asking about a different theological topic.",
-                sources=[],
-                confidence=0.0,
-                agent_used=agent_filter
+    except Exception as e:
+        logger.error(f"❌ Synthesis failed: {e}")
+        # Simple fallback
+        return agent_responses[0]["answer"] + f"\n\n(Additional perspectives from {len(agent_responses)-1} other theological domains were considered in this response.)"
+
+@app.post("/ask-enhanced", response_model=EnhancedQueryResponse)
+async def enhanced_query(request: EnhancedQueryRequest):
+    """Enhanced multi-agent query processing"""
+    
+    start_time = time.time()
+    logger.info(f"🔍 Enhanced query from {request.user}: {request.question}")
+    
+    try:
+        # If no decomposition provided, treat as simple question
+        if not request.decomposition or not request.decomposition.isComplex:
+            logger.info("📝 Processing as simple question")
+            
+            # Default to Christian Theology for simple questions
+            agent_response = await query_agent_with_context(
+                request.question, 
+                "Christian_Theology", 
+                request.maxChunks
+            )
+            
+            return EnhancedQueryResponse(
+                answer=agent_response["answer"],
+                sources=agent_response["sources"],
+                agentResponses=[AgentResponse(
+                    agent=agent_response["agent"],
+                    subQuestion=request.question,
+                    answer=agent_response["answer"],
+                    sources=agent_response["sources"],
+                    confidence=agent_response["confidence"],
+                    processingTime=agent_response["processing_time"]
+                )],
+                confidence=agent_response["confidence"],
+                processingTime=time.time() - start_time,
+                synthesisStrategy="single_agent",
+                agentsUsed=[agent_response["agent"]]
             )
         
-        # Generate answer with Mistral-Nemo
-        answer = await generate_answer(request.question, chunks)
+        # Complex question - multi-agent processing
+        logger.info(f"🔄 Processing complex question with {len(request.decomposition.subQuestions)} sub-questions")
         
-        # Calculate confidence
-        avg_distance = sum(chunk["distance"] for chunk in chunks) / len(chunks)
-        confidence = max(0.0, 1.0 - avg_distance)
+        # Collect all unique agents
+        all_agents = set()
+        for sub_q in request.decomposition.subQuestions:
+            all_agents.update(sub_q.suggestedAgents)
         
-        return QueryResponse(
-            answer=answer,
-            sources=[{
-                "agent": chunk["agent"],
-                "source": chunk["source"],
-                "human_id": chunk["human_id"],
-                "distance": chunk["distance"]
-            } for chunk in chunks],
-            confidence=confidence,
-            agent_used=agent_filter
+        # Query each agent in parallel
+        agent_tasks = []
+        for agent in all_agents:
+            # Find the most relevant sub-question for this agent
+            relevant_question = request.question  # Default to main question
+            for sub_q in request.decomposition.subQuestions:
+                if agent in sub_q.suggestedAgents:
+                    relevant_question = sub_q.question
+                    break
+            
+            task = query_agent_with_context(relevant_question, agent, request.maxChunks)
+            agent_tasks.append(task)
+        
+        # Execute all agent queries in parallel
+        agent_responses = await asyncio.gather(*agent_tasks, return_exceptions=True)
+        
+        # Filter successful responses
+        successful_responses = [
+            resp for resp in agent_responses 
+            if isinstance(resp, dict) and not resp.get("error")
+        ]
+        
+        if not successful_responses:
+            raise HTTPException(status_code=500, detail="All agent queries failed")
+        
+        # Synthesize responses
+        synthesized_answer = await synthesize_multi_agent_responses(
+            successful_responses, 
+            request.question, 
+            request.decomposition.synthesisStrategy
+        )
+        
+        # Combine all sources
+        all_sources = []
+        for resp in successful_responses:
+            all_sources.extend(resp["sources"])
+        
+        # Calculate overall confidence
+        avg_confidence = sum(resp["confidence"] for resp in successful_responses) / len(successful_responses)
+        
+        # Create agent response objects
+        agent_response_objects = [
+            AgentResponse(
+                agent=resp["agent"],
+                subQuestion=resp["question"],
+                answer=resp["answer"],
+                sources=resp["sources"],
+                confidence=resp["confidence"],
+                processingTime=resp["processing_time"]
+            )
+            for resp in successful_responses
+        ]
+        
+        return EnhancedQueryResponse(
+            answer=synthesized_answer,
+            sources=all_sources[:10],  # Limit to top 10 sources
+            agentResponses=agent_response_objects,
+            confidence=avg_confidence,
+            processingTime=time.time() - start_time,
+            synthesisStrategy=request.decomposition.synthesisStrategy,
+            agentsUsed=list(all_agents)
         )
         
     except Exception as e:
-        logger.error(f"❌ Query processing failed: {e}")
+        logger.error(f"❌ Enhanced query failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/")
-async def root():
-    """Root endpoint"""
+# Keep legacy endpoint for backward compatibility
+@app.post("/ask")
+async def simple_query(request: SimpleQueryRequest):
+    """Legacy single-agent endpoint"""
+    
+    enhanced_request = EnhancedQueryRequest(
+        question=request.question,
+        user=request.user
+    )
+    
+    response = await enhanced_query(enhanced_request)
+    
+    # Return simplified response for backward compatibility
     return {
-        "service": "MagisAI Gateway",
-        "version": "1.0.0",
-        "status": "ready",
-        "mistral_model": "mistral-nemo",
-        "endpoints": {
-            "health": "/health",
-            "query": "/query (POST)",
-            "docs": "/docs"
-        }
+        "answer": response.answer,
+        "sources": response.sources
     }
 
 if __name__ == "__main__":
