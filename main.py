@@ -118,6 +118,10 @@ class MistralQueryAgent:
     async def _mistral_request(self, messages: List[Dict], max_tokens: int = 4000, temperature: float = 0.3) -> str:
         """Make request to Mistral with proper formatting"""
         
+        if not RUNPOD_URL or not RUNPOD_KEY:
+            logger.error("Missing RUNPOD_URL or RUNPOD_KEY environment variables")
+            return "Error: Mistral API not configured"
+        
         # Format for Mistral-Large with instruction tags
         formatted_messages = []
         for msg in messages:
@@ -133,11 +137,14 @@ class MistralQueryAgent:
                 formatted_messages.append(msg)
         
         try:
+            logger.info(f"Making Mistral request to: {RUNPOD_URL}")
+            logger.debug(f"Request payload: {json.dumps({'model': RUNPOD_MODEL, 'messages': formatted_messages[:1]}, indent=2)[:200]}...")
+            
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     RUNPOD_URL,
                     json={
-                        "model": RUNPOD_MODEL,
+                        "model": RUNPOD_MODEL or "mistralai/Mistral-Large-Instruct-2407",
                         "messages": formatted_messages,
                         "max_tokens": max_tokens,
                         "temperature": temperature,
@@ -147,28 +154,72 @@ class MistralQueryAgent:
                         "Authorization": f"Bearer {RUNPOD_KEY}",
                         "Content-Type": "application/json"
                     },
-                    timeout=30.0
+                    timeout=60.0  # Increased timeout
                 )
+                
+                logger.info(f"Mistral response status: {response.status_code}")
                 
                 if response.status_code == 200:
                     result = response.json()
-                    if result.get("choices") and result["choices"][0].get("message"):
-                        content = result["choices"][0]["message"]["content"].strip()
+                    
+                    # Log response structure for debugging
+                    logger.debug(f"Response keys: {list(result.keys())}")
+                    
+                    # Try multiple response formats
+                    content = None
+                    
+                    # Standard OpenAI format
+                    if result.get("choices") and len(result["choices"]) > 0:
+                        if result["choices"][0].get("message", {}).get("content"):
+                            content = result["choices"][0]["message"]["content"].strip()
+                            logger.info("✓ Extracted content from OpenAI format")
+                    
+                    # RunPod/vLLM format
+                    elif result.get("choices") and len(result["choices"]) > 0:
+                        if result["choices"][0].get("text"):
+                            content = result["choices"][0]["text"].strip()
+                            logger.info("✓ Extracted content from vLLM format")
+                    
+                    # Simple response format
+                    elif result.get("response"):
+                        content = result["response"].strip()
+                        logger.info("✓ Extracted content from simple format")
+                    
+                    # Direct output format
+                    elif result.get("output"):
+                        content = result["output"].strip()
+                        logger.info("✓ Extracted content from output format")
+                    
+                    # Generated text format
+                    elif result.get("generated_text"):
+                        content = result["generated_text"].strip()
+                        logger.info("✓ Extracted content from generated_text format")
+                    
+                    if content:
                         # Update usage stats
                         self.usage_stats["requests"] += 1
                         if result.get("usage", {}).get("total_tokens"):
                             self.usage_stats["tokens"] += result["usage"]["total_tokens"]
                         return content
-                    elif result.get("response"):
-                        content = result["response"].strip()
-                        self.usage_stats["requests"] += 1
-                        return content
+                    else:
+                        logger.error(f"Could not extract content from response: {json.dumps(result, indent=2)[:500]}")
+                        return "Error: Unable to extract response from Mistral"
+                
                 else:
-                    logger.error(f"Mistral API error: {response.status_code} - {response.text}")
-                    return "Error: Failed to get response from Mistral"
+                    logger.error(f"Mistral API error: {response.status_code}")
+                    logger.error(f"Response text: {response.text[:500]}")
+                    return f"Error: Mistral API returned {response.status_code}"
                     
+        except httpx.TimeoutException:
+            logger.error(f"Mistral request timed out after 60 seconds")
+            return "Error: Request timed out"
+        except httpx.ConnectError as e:
+            logger.error(f"Failed to connect to Mistral: {e}")
+            return "Error: Could not connect to Mistral API"
         except Exception as e:
-            logger.error(f"Mistral request failed: {e}")
+            logger.error(f"Mistral request failed with unexpected error: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return f"Error: {str(e)}"
     
     async def _analyze_query(self, query: str) -> Dict[str, Any]:
