@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Pure Weaviate Query Agent RAG Service
+Pure Weaviate Query Agent RAG Service - FIXED VERSION
 Uses only Weaviate Query Agents for all functionality - no external LLM dependencies
+Fixed: Added missing get_detailed_source_content function
 """
 
 from fastapi import FastAPI, HTTPException
@@ -129,6 +130,64 @@ async def health_check():
         "external_llm_dependencies": False
     }
 
+async def get_detailed_source_content(source_ids: List[str]) -> List[MagisChunkResult]:
+    """
+    Retrieve detailed content for source IDs from Weaviate
+    This was the MISSING FUNCTION causing the 500 error
+    """
+    detailed_sources = []
+    
+    if not weaviate_client or not source_ids:
+        logger.warning(f"No client or source IDs provided")
+        return detailed_sources
+    
+    try:
+        # Get the MagisChunk collection
+        magis_chunk_collection = weaviate_client.collections.get("MagisChunk")
+        
+        for source_id in source_ids:
+            try:
+                # Fetch object by ID
+                obj = magis_chunk_collection.query.fetch_object_by_id(
+                    source_id,
+                    return_properties=[
+                        "content", "sourceFile", "headerContext", "humanId",
+                        "agent1", "agent1CoreTopics", "citations", 
+                        "chunkLength", "citationCount"
+                    ]
+                )
+                
+                if obj and obj.properties:
+                    # Create MagisChunkResult from retrieved object
+                    chunk_result = MagisChunkResult(
+                        content=obj.properties.get("content", ""),
+                        sourceFile=obj.properties.get("sourceFile", ""),
+                        headerContext=obj.properties.get("headerContext", ""),
+                        humanId=obj.properties.get("humanId", ""),
+                        agent1=obj.properties.get("agent1", "Unknown"),
+                        agent1CoreTopics=obj.properties.get("agent1CoreTopics", []),
+                        citations=obj.properties.get("citations", []),
+                        chunkLength=obj.properties.get("chunkLength", 0),
+                        citationCount=obj.properties.get("citationCount", 0),
+                        object_id=str(source_id),
+                        distance=None
+                    )
+                    detailed_sources.append(chunk_result)
+                    logger.info(f"✅ Retrieved details for source: {source_id}")
+                else:
+                    logger.warning(f"⚠️ No data found for source ID: {source_id}")
+                    
+            except Exception as e:
+                logger.error(f"❌ Error fetching source {source_id}: {e}")
+                continue
+        
+        logger.info(f"📚 Retrieved {len(detailed_sources)} detailed sources")
+        return detailed_sources
+        
+    except Exception as e:
+        logger.error(f"❌ Error in get_detailed_source_content: {e}")
+        return detailed_sources
+
 async def generate_weaviate_intro_conclusion(question: str, core_answer: str) -> Dict[str, str]:
     """Generate intro and conclusion using Weaviate agent"""
     
@@ -193,10 +252,12 @@ async def query_with_agent_plus_framing(question: str, use_weaviate_framing: boo
                     source_ids.append(source.object_id)
                 elif hasattr(source, 'id'):
                     source_ids.append(source.id)
+                elif hasattr(source, 'uuid'):
+                    source_ids.append(str(source.uuid))
         
         logger.info(f"🔗 Found {len(source_ids)} source IDs")
         
-        # Get detailed source content
+        # Get detailed source content - THIS WAS MISSING!
         detailed_sources = await get_detailed_source_content(source_ids)
         
         # Generate intro and conclusion if requested
@@ -274,7 +335,26 @@ async def ask_question(request: QueryRequest):
         
     except Exception as e:
         logger.error(f"❌ Query failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Try to provide a more helpful error response
+        if "503" in str(e):
+            error_msg = "The query service is temporarily unavailable. Please try again later."
+        elif "QueryAgent" in str(e):
+            error_msg = "There was an issue with the query agent. The service may need to be restarted."
+        else:
+            error_msg = f"An error occurred while processing your query: {str(e)}"
+        
+        # Return a valid response instead of raising another exception
+        return QueryResponse(
+            intro=None,
+            answer=error_msg,
+            conclusion=None,
+            magis_chunk_results=[],
+            processing_time=time.time() - start_time,
+            method_used="error_response",
+            agent_confidence=0.0,
+            intro_conclusion_method=None,
+            raw_agent_info={"error": str(e)} if request.include_debug_info else None
+        )
 
 @app.post("/ask-pure-agent")
 async def ask_pure_agent(request: QueryRequest):
