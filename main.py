@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced FastAPI RAG Service with Weaviate Query Agent
-Uses Weaviate's intelligent query agent for better results
+Enhanced FastAPI RAG Service with Weaviate Query Agent + Intro/Conclusion
+Uses Weaviate Query Agent for core answers with Mistral for intro/conclusion OR separate Weaviate agent
 """
 
 from fastapi import FastAPI, HTTPException
@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="Enhanced RAG API with Query Agent", version="2.0.0")
+app = FastAPI(title="Enhanced RAG API with Query Agent + Intro/Conclusion", version="2.1.0")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -32,9 +32,10 @@ RUNPOD_URL = os.getenv("RUNPOD_URL")
 RUNPOD_KEY = os.getenv("RUNPOD_KEY")
 RUNPOD_MODEL = os.getenv("RUNPOD_MODEL")
 
-# Initialize Weaviate client and Query Agent
+# Initialize Weaviate client and agents
 weaviate_client = None
-query_agent = None
+main_query_agent = None
+intro_conclusion_agent = None  # Optional second agent
 
 try:
     weaviate_client = weaviate.connect_to_weaviate_cloud(
@@ -42,177 +43,134 @@ try:
         auth_credentials=Auth.api_key(WEAVIATE_KEY)
     )
     
-    # Initialize the Query Agent
-    query_agent = QueryAgent(
+    # Main Query Agent for core answers
+    main_query_agent = QueryAgent(
         client=weaviate_client,
         collections=[
             QueryAgentCollectionConfig(
                 name="MagisChunk",
-                target_vector=["content_vector"],  # Adjust if your vector name is different
+                target_vector=["content_vector"],
             ),
         ],
     )
     
-    logger.info("✅ Connected to Weaviate with Query Agent")
+    # Optional: Second agent for intro/conclusion (if you want pure Weaviate approach)
+    # This could use the same collection or a different one optimized for contextual framing
+    try:
+        intro_conclusion_agent = QueryAgent(
+            client=weaviate_client,
+            collections=[
+                QueryAgentCollectionConfig(
+                    name="MagisChunk",  # Could be a different collection for contextual content
+                    target_vector=["content_vector"],
+                ),
+            ],
+        )
+        logger.info("✅ Both main and intro/conclusion agents initialized")
+    except Exception as e:
+        logger.warning(f"⚠️ Intro/conclusion agent failed to initialize: {e}")
+        intro_conclusion_agent = None
+    
+    logger.info("✅ Connected to Weaviate with Query Agents")
 except Exception as e:
     logger.error(f"❌ Weaviate/Query Agent setup failed: {e}")
 
 class QueryRequest(BaseModel):
     question: str
     user: str
-    force_method: Optional[str] = None  # "agent", "basic", or None for auto-detect
+    use_weaviate_intro_conclusion: Optional[bool] = False  # True for Weaviate agent, False for Mistral
+    include_intro_conclusion: Optional[bool] = True
+    include_debug_info: Optional[bool] = False  # Include raw agent response details
     max_chunks: Optional[int] = 5
 
-class AgentSource(BaseModel):
+class MagisChunkResult(BaseModel):
     content: str
-    source: str
-    metadata: Dict[str, Any] = {}
+    sourceFile: str
+    headerContext: str
+    humanId: str
+    agent1: str
+    agent1CoreTopics: List[str]
+    citations: List[str]
+    chunkLength: int
+    citationCount: int
+    object_id: str
+    distance: Optional[float] = None
 
 class QueryResponse(BaseModel):
-    answer: str
-    sources: List[AgentSource]
+    intro: Optional[str] = None
+    answer: str  # Core answer from Weaviate Query Agent (final_answer only)
+    conclusion: Optional[str] = None
+    magis_chunk_results: List[MagisChunkResult] = []  # Detailed source information
     processing_time: float
-    method_used: str  # "query_agent" or "basic_search"
-    complexity_assessment: str  # "simple", "moderate", "complex"
-    reasoning: str  # Why this method was chosen
+    method_used: str
     agent_confidence: Optional[float] = None
+    intro_conclusion_method: Optional[str] = None  # "mistral" or "weaviate_agent"
+    # Debug info (optional)
+    raw_agent_info: Optional[Dict[str, Any]] = None
 
 @app.get("/")
 async def root():
     return {
-        "service": "Enhanced RAG API with Query Agent",
-        "version": "2.0.0",
-        "features": ["weaviate_query_agent", "intelligent_retrieval", "enhanced_reasoning"],
+        "service": "Enhanced RAG API with Query Agent + Intro/Conclusion",
+        "version": "2.1.0",
+        "features": [
+            "weaviate_query_agent", 
+            "mistral_intro_conclusion", 
+            "optional_weaviate_intro_conclusion_agent",
+            "pure_agent_responses"
+        ],
         "status": "running"
     }
-
-@app.get("/models")
-async def check_available_models():
-    """Check what models are available on the RunPod endpoint"""
-    
-    if not RUNPOD_URL or not RUNPOD_KEY:
-        raise HTTPException(status_code=503, detail="RunPod not configured")
-    
-    try:
-        # Try to get models list
-        models_url = RUNPOD_URL.replace('/v1/chat/completions', '/v1/models')
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                models_url,
-                headers={
-                    "Authorization": f"Bearer {RUNPOD_KEY}",
-                    "Content-Type": "application/json"
-                },
-                timeout=10.0
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return {
-                    "error": f"Status {response.status_code}",
-                    "current_model": RUNPOD_MODEL,
-                    "configured_url": RUNPOD_URL,
-                    "response": response.text
-                }
-                
-    except Exception as e:
-        return {
-            "error": str(e),
-            "current_model": RUNPOD_MODEL,
-            "configured_url": RUNPOD_URL
-        }
-
-@app.post("/test-model")
-async def test_model_connection():
-    """Test the current model configuration"""
-    
-    if not RUNPOD_URL or not RUNPOD_KEY:
-        raise HTTPException(status_code=503, detail="RunPod not configured")
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                RUNPOD_URL,
-                json={
-                    "model": RUNPOD_MODEL,
-                    "messages": [{"role": "user", "content": "Hello, please respond with 'Test successful'"}],
-                    "max_tokens": 10,
-                    "temperature": 0.1
-                },
-                headers={
-                    "Authorization": f"Bearer {RUNPOD_KEY}",
-                    "Content-Type": "application/json"
-                },
-                timeout=15.0
-            )
-            
-            return {
-                "status_code": response.status_code,
-                "model_used": RUNPOD_MODEL,
-                "url_used": RUNPOD_URL,
-                "response": response.json() if response.status_code == 200 else response.text
-            }
-            
-    except Exception as e:
-        return {
-            "error": str(e),
-            "model_used": RUNPOD_MODEL,
-            "url_used": RUNPOD_URL
-        }
 
 @app.get("/health")
 async def health_check():
     return {
         "status": "healthy",
         "weaviate_connected": weaviate_client is not None and weaviate_client.is_ready(),
-        "query_agent_ready": query_agent is not None,
-        "runpod_configured": bool(RUNPOD_URL and RUNPOD_KEY),
+        "main_query_agent_ready": main_query_agent is not None,
+        "intro_conclusion_agent_ready": intro_conclusion_agent is not None,
+        "mistral_configured": bool(RUNPOD_URL and RUNPOD_KEY),
         "runpod_model": RUNPOD_MODEL,
-        "intelligent_routing": True,
-        "agent_collections": ["MagisChunk"] if query_agent else []
+        "agent_collections": ["MagisChunk"] if main_query_agent else []
     }
 
-async def assess_query_complexity(question: str) -> Dict[str, str]:
-    """Use Mistral to assess query complexity and recommend processing method"""
+async def generate_mistral_intro_conclusion(question: str, core_answer: str) -> Dict[str, str]:
+    """Generate intro and conclusion using Mistral"""
     
     if not RUNPOD_URL or not RUNPOD_KEY:
-        # Fallback to simple heuristics if no LLM available
-        return simple_complexity_heuristic(question)
+        return {
+            "intro": "Here's what I found regarding your question:",
+            "conclusion": "I hope this information is helpful to you."
+        }
     
-    complexity_prompt = f"""Analyze this question and determine its complexity for a theological/philosophical knowledge system:
+    # Generate intro
+    intro_prompt = f"""Based on this theological/philosophical question, write a brief, engaging introduction (1-2 sentences) that sets up the answer:
 
 Question: "{question}"
 
-Classify the complexity and recommend the best processing method:
+Write only the introduction, nothing else. Make it welcoming and contextual."""
 
-COMPLEXITY LEVELS:
-- SIMPLE: Basic factual questions, definitions, yes/no questions, single concept queries
-- MODERATE: Questions requiring some reasoning but straightforward to answer
-- COMPLEX: Multi-faceted questions, requires deep reasoning, philosophical analysis, connecting multiple concepts, comparative analysis
+    # Generate conclusion  
+    conclusion_prompt = f"""Based on this question and answer, write a brief conclusion (1-2 sentences) that wraps up the response helpfully:
 
-PROCESSING METHODS:
-- basic_search: For simple/moderate questions that can be answered with direct retrieval + basic generation
-- query_agent: For complex questions requiring intelligent reasoning, context understanding, and sophisticated retrieval
+Question: "{question}"
+Answer: "{core_answer[:500]}..."
 
-Respond in exactly this format:
-COMPLEXITY: [simple/moderate/complex]
-METHOD: [basic_search/query_agent]
-REASONING: [One sentence explanation of why this method is best]"""
+Write only the conclusion, nothing else. Make it encouraging and offer further assistance if needed."""
 
+    intro = "Here's what I found regarding your question:"
+    conclusion = "I hope this information helps with your inquiry."
+    
     try:
         async with httpx.AsyncClient() as client:
-            # Use the exact URL from environment
-            logger.info(f"Making request to: {RUNPOD_URL}")
-            
-            response = await client.post(
+            # Generate intro
+            intro_response = await client.post(
                 RUNPOD_URL,
                 json={
                     "model": RUNPOD_MODEL,
-                    "messages": [{"role": "user", "content": complexity_prompt}],
-                    "max_tokens": 150,
-                    "temperature": 0.1,  # Low temperature for consistent analysis
+                    "messages": [{"role": "user", "content": intro_prompt}],
+                    "max_tokens": 100,
+                    "temperature": 0.4,
                     "stream": False
                 },
                 headers={
@@ -222,330 +180,293 @@ REASONING: [One sentence explanation of why this method is best]"""
                 timeout=15.0
             )
             
-            logger.info(f"Response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                result = response.json()
+            if intro_response.status_code == 200:
+                result = intro_response.json()
                 if result.get("choices") and result["choices"][0].get("message"):
-                    analysis = result["choices"][0]["message"]["content"].strip()
-                    return parse_complexity_response(analysis)
+                    intro = result["choices"][0]["message"]["content"].strip()
                 elif result.get("response"):
-                    analysis = result["response"].strip()
-                    return parse_complexity_response(analysis)
-            else:
-                logger.error(f"RunPod error response: {response.text}")
+                    intro = result["response"].strip()
             
-            logger.warning("LLM complexity assessment failed, using heuristics")
-            return simple_complexity_heuristic(question)
-            
-    except Exception as e:
-        logger.error(f"Complexity assessment error: {e}")
-        return simple_complexity_heuristic(question)
-
-def parse_complexity_response(analysis: str) -> Dict[str, str]:
-    """Parse the LLM response for complexity assessment"""
-    
-    complexity = "moderate"
-    method = "basic_search"
-    reasoning = "Default fallback decision"
-    
-    try:
-        lines = analysis.split('\n')
-        for line in lines:
-            line = line.strip()
-            if line.startswith("COMPLEXITY:"):
-                complexity = line.split(":", 1)[1].strip().lower()
-            elif line.startswith("METHOD:"):
-                method = line.split(":", 1)[1].strip().lower()
-            elif line.startswith("REASONING:"):
-                reasoning = line.split(":", 1)[1].strip()
-    except Exception as e:
-        logger.error(f"Failed to parse complexity response: {e}")
-    
-    return {
-        "complexity": complexity,
-        "method": method,
-        "reasoning": reasoning
-    }
-
-def simple_complexity_heuristic(question: str) -> Dict[str, str]:
-    """Fallback heuristic-based complexity assessment"""
-    
-    question_lower = question.lower()
-    
-    # Simple question indicators
-    simple_indicators = [
-        "what is", "who is", "when did", "where is", "define", "meaning of",
-        "yes or no", "true or false", "is it", "does it", "can you"
-    ]
-    
-    # Complex question indicators  
-    complex_indicators = [
-        "why does", "how does", "explain the relationship", "compare", "analyze",
-        "what are the implications", "philosophical", "theological significance",
-        "consciousness", "quantum", "existence", "metaphysical", "epistemological",
-        "prove that", "demonstrate", "argue for", "justify"
-    ]
-    
-    if any(indicator in question_lower for indicator in complex_indicators):
-        return {
-            "complexity": "complex",
-            "method": "query_agent", 
-            "reasoning": "Question contains complex philosophical/theological concepts requiring intelligent analysis"
-        }
-    elif any(indicator in question_lower for indicator in simple_indicators):
-        return {
-            "complexity": "simple",
-            "method": "basic_search",
-            "reasoning": "Simple factual question suitable for direct retrieval"
-        }
-    else:
-        return {
-            "complexity": "moderate", 
-            "method": "basic_search",
-            "reasoning": "Moderate complexity question suitable for enhanced retrieval"
-        }
-
-async def query_with_agent(question: str) -> Dict[str, Any]:
-    """Use Weaviate Query Agent for intelligent retrieval and reasoning"""
-    
-    if not query_agent:
-        raise HTTPException(status_code=503, detail="Query Agent not available")
-    
-    try:
-        # Run the query agent
-        result = query_agent.run(question)
-        
-        # Extract the answer and sources from agent result
-        # The agent typically returns a structured response
-        answer = str(result.answer) if hasattr(result, 'answer') else str(result)
-        
-        # Try to extract sources if available
-        sources = []
-        if hasattr(result, 'sources') and result.sources:
-            for source in result.sources:
-                agent_source = AgentSource(
-                    content=getattr(source, 'content', str(source)),
-                    source=getattr(source, 'source', 'Query Agent Result'),
-                    metadata=getattr(source, 'metadata', {})
-                )
-                sources.append(agent_source)
-        else:
-            # If no explicit sources, create one from the result
-            sources.append(AgentSource(
-                content=answer,
-                source="Weaviate Query Agent",
-                metadata={"method": "intelligent_query_agent"}
-            ))
-        
-        logger.info(f"✅ Query Agent processed successfully")
-        return {
-            "answer": answer,
-            "sources": sources,
-            "confidence": getattr(result, 'confidence', 0.9)
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Query Agent failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Query Agent error: {str(e)}")
-
-async def basic_search_with_generation(question: str, max_chunks: int = 5) -> Dict[str, Any]:
-    """Basic vector search + Mistral generation for simple/moderate questions"""
-    
-    if not weaviate_client:
-        raise HTTPException(status_code=503, detail="Weaviate not connected")
-    
-    try:
-        # Get relevant chunks
-        collection = weaviate_client.collections.get("MagisChunk")
-        
-        response = collection.query.near_text(
-            query=question,
-            limit=max_chunks,
-            return_metadata=["distance"],
-            return_properties=["content", "sourceFile"]
-        )
-        
-        sources = []
-        context_parts = []
-        
-        for i, obj in enumerate(response.objects, 1):
-            content = obj.properties.get("content", "")
-            source_file = obj.properties.get("sourceFile", "Unknown")
-            
-            source = AgentSource(
-                content=content,
-                source=source_file,
-                metadata={
-                    "distance": obj.metadata.distance if hasattr(obj.metadata, 'distance') else 1.0,
-                    "method": "basic_search_with_generation"
-                }
-            )
-            sources.append(source)
-            context_parts.append(f"[{i}] {content}")
-        
-        if not sources:
-            return {
-                "answer": "No relevant information found to answer your question.",
-                "sources": [],
-                "confidence": 0.0
-            }
-        
-        # Generate answer using Mistral
-        context = "\n\n".join(context_parts)
-        
-        generation_prompt = f"""Question: {question}
-
-Context from theological sources:
-{context}
-
-Please provide a clear, accurate answer based on the context above. Use the information provided to give a helpful response."""
-
-        # Generate with Mistral
-        async with httpx.AsyncClient() as client:
-            logger.info(f"Making generation request to: {RUNPOD_URL}")
-            
-            response = await client.post(
+            # Generate conclusion
+            conclusion_response = await client.post(
                 RUNPOD_URL,
                 json={
                     "model": RUNPOD_MODEL,
-                    "messages": [{"role": "user", "content": generation_prompt}],
-                    "max_tokens": 800,
-                    "temperature": 0.3,
+                    "messages": [{"role": "user", "content": conclusion_prompt}],
+                    "max_tokens": 100,
+                    "temperature": 0.4,
                     "stream": False
                 },
                 headers={
                     "Authorization": f"Bearer {RUNPOD_KEY}",
                     "Content-Type": "application/json"
                 },
-                timeout=30.0
+                timeout=15.0
             )
             
-            logger.info(f"Generation response status: {response.status_code}")
-            
-            answer = "Based on the retrieved sources, I can provide relevant information, but please try again for a complete response."
-            
-            if response.status_code == 200:
-                result = response.json()
+            if conclusion_response.status_code == 200:
+                result = conclusion_response.json()
                 if result.get("choices") and result["choices"][0].get("message"):
-                    answer = result["choices"][0]["message"]["content"].strip()
+                    conclusion = result["choices"][0]["message"]["content"].strip()
                 elif result.get("response"):
-                    answer = result["response"].strip()
-            else:
-                logger.error(f"Generation error response: {response.text}")
-        
-        logger.info(f"✅ Basic search + generation completed with {len(sources)} sources")
+                    conclusion = result["response"].strip()
+            
+    except Exception as e:
+        logger.error(f"Mistral intro/conclusion generation error: {e}")
+    
+    return {"intro": intro, "conclusion": conclusion}
+
+async def generate_weaviate_intro_conclusion(question: str, core_answer: str) -> Dict[str, str]:
+    """Generate intro and conclusion using Weaviate agent"""
+    
+    if not intro_conclusion_agent:
         return {
-            "answer": answer,
-            "sources": sources,
-            "confidence": 0.8 if sources else 0.0
+            "intro": "Based on the theological sources available:",
+            "conclusion": "This information comes from our knowledge base of theological and philosophical texts."
         }
+    
+    try:
+        # Generate contextual intro using the agent
+        intro_query = f"Provide a brief introduction for answering this question: {question}"
+        intro_result = intro_conclusion_agent.run(intro_query)
+        intro = str(intro_result.answer) if hasattr(intro_result, 'answer') else str(intro_result)
+        
+        # Generate contextual conclusion using the agent
+        conclusion_query = f"Provide a brief conclusion for this answer about '{question}': {core_answer[:300]}..."
+        conclusion_result = intro_conclusion_agent.run(conclusion_query)
+        conclusion = str(conclusion_result.answer) if hasattr(conclusion_result, 'answer') else str(conclusion_result)
+        
+        # Keep them concise (truncate if too long)
+        intro = intro[:300] + "..." if len(intro) > 300 else intro
+        conclusion = conclusion[:300] + "..." if len(conclusion) > 300 else conclusion
+        
+        return {"intro": intro, "conclusion": conclusion}
         
     except Exception as e:
-        logger.error(f"❌ Basic search + generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Search and generation error: {str(e)}")
+        logger.error(f"Weaviate intro/conclusion generation error: {e}")
+        return {
+            "intro": "Based on the theological sources available:",
+            "conclusion": "This information comes from our knowledge base of theological and philosophical texts."
+        }
 
-async def basic_vector_search(question: str, max_chunks: int = 5) -> Dict[str, Any]:
-    """Fallback to basic vector search"""
+async def get_detailed_source_content(source_ids: List[str]) -> List[MagisChunkResult]:
+    """Fetch detailed content for each source ID from MagisChunk collection"""
     
     if not weaviate_client:
-        raise HTTPException(status_code=503, detail="Weaviate not connected")
+        return []
     
     try:
         collection = weaviate_client.collections.get("MagisChunk")
+        detailed_results = []
         
-        response = collection.query.near_text(
-            query=question,
-            limit=max_chunks,
-            return_metadata=["distance"],
-            return_properties=["content", "sourceFile"]
-        )
+        for source_id in source_ids:
+            try:
+                # Get the full object by ID
+                obj = collection.query.fetch_object_by_id(source_id)
+                
+                if obj:
+                    properties = obj.properties
+                    
+                    # Parse citations if they exist as a string
+                    citations_raw = properties.get("citations", "[]")
+                    if isinstance(citations_raw, str):
+                        try:
+                            # Try to parse as a list representation
+                            citations = eval(citations_raw) if citations_raw != "[]" else []
+                        except:
+                            citations = [citations_raw] if citations_raw else []
+                    else:
+                        citations = citations_raw if isinstance(citations_raw, list) else []
+                    
+                    # Parse agent1CoreTopics if it exists as a string
+                    core_topics_raw = properties.get("agent1CoreTopics", "[]")
+                    if isinstance(core_topics_raw, str):
+                        try:
+                            core_topics = eval(core_topics_raw) if core_topics_raw != "[]" else []
+                        except:
+                            core_topics = [core_topics_raw] if core_topics_raw else []
+                    else:
+                        core_topics = core_topics_raw if isinstance(core_topics_raw, list) else []
+                    
+                    result = MagisChunkResult(
+                        content=properties.get("content", ""),
+                        sourceFile=properties.get("sourceFile", "Unknown"),
+                        headerContext=properties.get("headerContext", ""),
+                        humanId=properties.get("humanId", ""),
+                        agent1=properties.get("agent1", ""),
+                        agent1CoreTopics=core_topics,
+                        citations=citations,
+                        chunkLength=properties.get("chunkLength", 0),
+                        citationCount=properties.get("citationCount", 0),
+                        object_id=source_id,
+                        distance=getattr(obj.metadata, 'distance', None) if hasattr(obj, 'metadata') else None
+                    )
+                    detailed_results.append(result)
+                    
+            except Exception as e:
+                logger.error(f"Failed to fetch details for source {source_id}: {e}")
+                continue
         
-        sources = []
-        for obj in response.objects:
-            source = AgentSource(
-                content=obj.properties.get("content", ""),
-                source=obj.properties.get("sourceFile", "Unknown"),
-                metadata={
-                    "distance": obj.metadata.distance if hasattr(obj.metadata, 'distance') else 1.0,
-                    "method": "basic_vector_search"
-                }
-            )
-            sources.append(source)
+        logger.info(f"✅ Retrieved detailed content for {len(detailed_results)} sources")
+        return detailed_results
         
-        # Create basic answer from first source
-        answer = f"Based on the retrieved information: {sources[0].content[:500]}..." if sources else "No relevant information found."
+    except Exception as e:
+        logger.error(f"❌ Failed to get detailed source content: {e}")
+        return []
+
+async def query_with_agent_plus_framing(question: str, use_weaviate_framing: bool = False, include_framing: bool = True, include_debug: bool = False) -> Dict[str, Any]:
+    """Use Weaviate Query Agent for core answer, with optional intro/conclusion framing"""
+    
+    if not main_query_agent:
+        raise HTTPException(status_code=503, detail="Main Query Agent not available")
+    
+    try:
+        # Get core answer from Weaviate Query Agent
+        logger.info("🔍 Running main query agent...")
+        result = main_query_agent.run(question)
         
-        logger.info(f"✅ Basic search retrieved {len(sources)} sources")
+        # Extract just the final_answer from the result
+        core_answer = ""
+        if hasattr(result, 'final_answer'):
+            core_answer = str(result.final_answer)
+        elif hasattr(result, 'answer'):
+            core_answer = str(result.answer)
+        else:
+            core_answer = str(result)
+        
+        logger.info(f"📝 Extracted core answer: {len(core_answer)} characters")
+        
+        # Extract source IDs for detailed lookup
+        source_ids = []
+        if hasattr(result, 'sources') and result.sources:
+            for source in result.sources:
+                if hasattr(source, 'object_id'):
+                    source_ids.append(source.object_id)
+                elif hasattr(source, 'id'):
+                    source_ids.append(source.id)
+        
+        logger.info(f"🔗 Found {len(source_ids)} source IDs")
+        
+        # Get detailed source content
+        detailed_sources = await get_detailed_source_content(source_ids)
+        
+        # Generate intro and conclusion if requested
+        intro = None
+        conclusion = None
+        framing_method = None
+        
+        if include_framing:
+            if use_weaviate_framing and intro_conclusion_agent:
+                logger.info("🎭 Generating intro/conclusion with Weaviate agent...")
+                framing = await generate_weaviate_intro_conclusion(question, core_answer)
+                framing_method = "weaviate_agent"
+            else:
+                logger.info("🎭 Generating intro/conclusion with Mistral...")
+                framing = await generate_mistral_intro_conclusion(question, core_answer)
+                framing_method = "mistral"
+            
+            intro = framing.get("intro")
+            conclusion = framing.get("conclusion")
+        
+        # Prepare debug info if requested
+        raw_agent_info = None
+        if include_debug:
+            raw_agent_info = {
+                "output_type": getattr(result, 'output_type', 'unknown'),
+                "original_query": getattr(result, 'original_query', question),
+                "collection_names": getattr(result, 'collection_names', []),
+                "total_time": getattr(result, 'total_time', 0),
+                "usage": str(getattr(result, 'usage', 'N/A')),
+                "is_partial_answer": getattr(result, 'is_partial_answer', False),
+                "source_count": len(source_ids)
+            }
+        
+        logger.info(f"✅ Query Agent + framing completed successfully")
         return {
-            "answer": answer,
-            "sources": sources,
-            "confidence": 0.7 if sources else 0.0
+            "intro": intro,
+            "answer": core_answer,
+            "conclusion": conclusion,
+            "detailed_sources": detailed_sources,
+            "confidence": getattr(result, 'confidence', 0.9),
+            "framing_method": framing_method,
+            "raw_agent_info": raw_agent_info
         }
         
     except Exception as e:
-        logger.error(f"❌ Basic search failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Search error: {str(e)}")
+        logger.error(f"❌ Query Agent + framing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query Agent error: {str(e)}")
 
 @app.post("/ask", response_model=QueryResponse)
 async def ask_question(request: QueryRequest):
-    """Main query endpoint with intelligent complexity-based routing"""
+    """Main query endpoint using Weaviate Query Agent with optional intro/conclusion"""
     
     start_time = time.time()
     logger.info(f"Query from {request.user}: {request.question}")
     
     try:
-        # Assess complexity and choose method (unless forced)
-        if request.force_method:
-            if request.force_method == "agent":
-                assessment = {"complexity": "complex", "method": "query_agent", "reasoning": "Forced to use query agent"}
-            else:
-                assessment = {"complexity": "simple", "method": "basic_search", "reasoning": "Forced to use basic search"}
-        else:
-            assessment = await assess_query_complexity(request.question)
-        
-        logger.info(f"Complexity assessment: {assessment['complexity']} -> {assessment['method']}")
-        
-        # Route to appropriate method
-        if assessment["method"] == "query_agent" and query_agent:
-            result = await query_with_agent(request.question)
-            method_used = "query_agent"
-        else:
-            # Use basic search + Mistral generation for simple/moderate questions
-            result = await basic_search_with_generation(request.question, request.max_chunks)
-            method_used = "basic_search_with_generation"
+        # Use Query Agent for core answer with optional framing
+        result = await query_with_agent_plus_framing(
+            question=request.question,
+            use_weaviate_framing=request.use_weaviate_intro_conclusion,
+            include_framing=request.include_intro_conclusion,
+            include_debug=request.include_debug_info
+        )
         
         return QueryResponse(
+            intro=result["intro"],
             answer=result["answer"],
-            sources=result["sources"],
+            conclusion=result["conclusion"],
+            magis_chunk_results=result["detailed_sources"],
             processing_time=time.time() - start_time,
-            method_used=method_used,
-            complexity_assessment=assessment["complexity"],
-            reasoning=assessment["reasoning"],
-            agent_confidence=result.get("confidence")
+            method_used="weaviate_query_agent_with_detailed_sources",
+            agent_confidence=result.get("confidence"),
+            intro_conclusion_method=result.get("framing_method"),
+            raw_agent_info=result.get("raw_agent_info")
         )
         
     except Exception as e:
         logger.error(f"❌ Query failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ask-agent")
-async def ask_with_agent_only(request: QueryRequest):
-    """Endpoint that forces use of Query Agent only"""
+@app.post("/ask-pure-agent")
+async def ask_pure_agent(request: QueryRequest):
+    """Endpoint that uses only Weaviate Query Agent (no intro/conclusion)"""
     
-    if not query_agent:
+    if not main_query_agent:
         raise HTTPException(status_code=503, detail="Query Agent not available")
     
-    # Force agent usage
-    request.force_method = "agent"
+    # Force no framing
+    request.include_intro_conclusion = False
     return await ask_question(request)
+
+@app.post("/ask-with-mistral-framing")
+async def ask_with_mistral_framing(request: QueryRequest):
+    """Endpoint that forces Mistral for intro/conclusion"""
+    
+    request.use_weaviate_intro_conclusion = False
+    request.include_intro_conclusion = True
+    return await ask_question(request)
+
+@app.post("/ask-with-weaviate-framing")
+async def ask_with_weaviate_framing(request: QueryRequest):
+    """Endpoint that forces Weaviate agent for intro/conclusion"""
+    
+    if not intro_conclusion_agent:
+        raise HTTPException(status_code=503, detail="Intro/conclusion agent not available")
+    
+    request.use_weaviate_intro_conclusion = True
+    request.include_intro_conclusion = True
+    return await ask_question(request)
+
+# Legacy endpoints for backward compatibility
+@app.post("/ask-agent")
+async def ask_with_agent_only(request: QueryRequest):
+    """Legacy endpoint - now uses pure Weaviate Query Agent"""
+    return await ask_pure_agent(request)
 
 @app.post("/ask-basic")
 async def ask_with_basic_search_only(request: QueryRequest):
-    """Endpoint that forces use of basic search + generation only"""
-    
-    # Force basic search
-    request.force_method = "basic"
+    """Legacy endpoint - now redirects to main agent endpoint"""
     return await ask_question(request)
 
 if __name__ == "__main__":
