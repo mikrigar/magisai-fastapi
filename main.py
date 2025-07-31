@@ -30,6 +30,7 @@ WEAVIATE_URL = os.getenv("WEAVIATE_URL")
 WEAVIATE_KEY = os.getenv("WEAVIATE_API_KEY") or os.getenv("WEAVIATE_KEY")
 RUNPOD_URL = os.getenv("RUNPOD_URL")
 RUNPOD_KEY = os.getenv("RUNPOD_KEY")
+RUNPOD_MODEL = os.getenv("RUNPOD_MODEL")
 
 # Initialize Weaviate client and Query Agent
 weaviate_client = None
@@ -85,6 +86,82 @@ async def root():
         "status": "running"
     }
 
+@app.get("/models")
+async def check_available_models():
+    """Check what models are available on the RunPod endpoint"""
+    
+    if not RUNPOD_URL or not RUNPOD_KEY:
+        raise HTTPException(status_code=503, detail="RunPod not configured")
+    
+    try:
+        # Try to get models list
+        models_url = RUNPOD_URL.replace('/v1/chat/completions', '/v1/models')
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                models_url,
+                headers={
+                    "Authorization": f"Bearer {RUNPOD_KEY}",
+                    "Content-Type": "application/json"
+                },
+                timeout=10.0
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {
+                    "error": f"Status {response.status_code}",
+                    "current_model": RUNPOD_MODEL,
+                    "configured_url": RUNPOD_URL,
+                    "response": response.text
+                }
+                
+    except Exception as e:
+        return {
+            "error": str(e),
+            "current_model": RUNPOD_MODEL,
+            "configured_url": RUNPOD_URL
+        }
+
+@app.post("/test-model")
+async def test_model_connection():
+    """Test the current model configuration"""
+    
+    if not RUNPOD_URL or not RUNPOD_KEY:
+        raise HTTPException(status_code=503, detail="RunPod not configured")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                RUNPOD_URL,
+                json={
+                    "model": RUNPOD_MODEL,
+                    "messages": [{"role": "user", "content": "Hello, please respond with 'Test successful'"}],
+                    "max_tokens": 10,
+                    "temperature": 0.1
+                },
+                headers={
+                    "Authorization": f"Bearer {RUNPOD_KEY}",
+                    "Content-Type": "application/json"
+                },
+                timeout=15.0
+            )
+            
+            return {
+                "status_code": response.status_code,
+                "model_used": RUNPOD_MODEL,
+                "url_used": RUNPOD_URL,
+                "response": response.json() if response.status_code == 200 else response.text
+            }
+            
+    except Exception as e:
+        return {
+            "error": str(e),
+            "model_used": RUNPOD_MODEL,
+            "url_used": RUNPOD_URL
+        }
+
 @app.get("/health")
 async def health_check():
     return {
@@ -92,6 +169,7 @@ async def health_check():
         "weaviate_connected": weaviate_client is not None and weaviate_client.is_ready(),
         "query_agent_ready": query_agent is not None,
         "runpod_configured": bool(RUNPOD_URL and RUNPOD_KEY),
+        "runpod_model": RUNPOD_MODEL,
         "intelligent_routing": True,
         "agent_collections": ["MagisChunk"] if query_agent else []
     }
@@ -125,18 +203,26 @@ REASONING: [One sentence explanation of why this method is best]"""
 
     try:
         async with httpx.AsyncClient() as client:
+            # Use the exact URL from environment
+            logger.info(f"Making request to: {RUNPOD_URL}")
+            
             response = await client.post(
                 RUNPOD_URL,
                 json={
-                    "model": "mistralai/Mistral-Small-Instruct-2409",
+                    "model": RUNPOD_MODEL,
                     "messages": [{"role": "user", "content": complexity_prompt}],
                     "max_tokens": 150,
                     "temperature": 0.1,  # Low temperature for consistent analysis
                     "stream": False
                 },
-                headers={"Authorization": f"Bearer {RUNPOD_KEY}"},
+                headers={
+                    "Authorization": f"Bearer {RUNPOD_KEY}",
+                    "Content-Type": "application/json"
+                },
                 timeout=15.0
             )
+            
+            logger.info(f"Response status: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
@@ -146,6 +232,8 @@ REASONING: [One sentence explanation of why this method is best]"""
                 elif result.get("response"):
                     analysis = result["response"].strip()
                     return parse_complexity_response(analysis)
+            else:
+                logger.error(f"RunPod error response: {response.text}")
             
             logger.warning("LLM complexity assessment failed, using heuristics")
             return simple_complexity_heuristic(question)
@@ -315,18 +403,25 @@ Please provide a clear, accurate answer based on the context above. Use the info
 
         # Generate with Mistral
         async with httpx.AsyncClient() as client:
+            logger.info(f"Making generation request to: {RUNPOD_URL}")
+            
             response = await client.post(
                 RUNPOD_URL,
                 json={
-                    "model": "mistralai/Mistral-Small-Instruct-2409",
+                    "model": RUNPOD_MODEL,
                     "messages": [{"role": "user", "content": generation_prompt}],
                     "max_tokens": 800,
                     "temperature": 0.3,
                     "stream": False
                 },
-                headers={"Authorization": f"Bearer {RUNPOD_KEY}"},
+                headers={
+                    "Authorization": f"Bearer {RUNPOD_KEY}",
+                    "Content-Type": "application/json"
+                },
                 timeout=30.0
             )
+            
+            logger.info(f"Generation response status: {response.status_code}")
             
             answer = "Based on the retrieved sources, I can provide relevant information, but please try again for a complete response."
             
@@ -336,6 +431,8 @@ Please provide a clear, accurate answer based on the context above. Use the info
                     answer = result["choices"][0]["message"]["content"].strip()
                 elif result.get("response"):
                     answer = result["response"].strip()
+            else:
+                logger.error(f"Generation error response: {response.text}")
         
         logger.info(f"✅ Basic search + generation completed with {len(sources)} sources")
         return {
