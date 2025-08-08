@@ -119,7 +119,18 @@ def clean_ai_language(text: str) -> Tuple[str, List[str]]:
     transformation_notes = []
     original_text = text
     
-    # Patterns to remove or replace
+    # Document/source reference patterns that undermine authority
+    document_patterns = [
+        (r"^the documents? (?:and search results )?(?:do not present|present|show|indicate|suggest)", ""),
+        (r"^(?:based on )?the (?:sources?|documents?|information) (?:provided|available|presented)", ""),
+        (r"^the (?:search results|data|sources?) (?:show|indicate|suggest|reveal)", ""),
+        (r"^according to the (?:documents?|sources?|search results)", ""),
+        (r"^the (?:available )?information (?:suggests?|indicates?|shows?)", ""),
+        (r"^from the (?:sources?|documents?|materials?) (?:provided|available)", ""),
+        (r"therefore,? based on the (?:information|sources?) available", "therefore"),
+    ]
+    
+    # Standard AI patterns to remove or replace
     ai_patterns = [
         (r"according to the data", ""),
         (r"from the sources provided", ""),
@@ -139,13 +150,22 @@ def clean_ai_language(text: str) -> Tuple[str, List[str]]:
         (r"sources suggest", ""),
         (r"according to sources", ""),
         (r"based on available information", ""),
+        (r"the sources argue", ""),
+        (r"the documents indicate", ""),
+        (r"search results show", ""),
     ]
     
-    # Apply transformations
+    # Apply document pattern transformations first (these are most critical)
+    for pattern, replacement in document_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+            transformation_notes.append(f"Removed document reference: '{pattern}'")
+    
+    # Apply standard AI transformations
     for pattern, replacement in ai_patterns:
         if re.search(pattern, text, re.IGNORECASE):
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-            transformation_notes.append(f"Removed: '{pattern}'")
+            transformation_notes.append(f"Removed AI language: '{pattern}'")
     
     # Clean up extra spaces and punctuation
     text = re.sub(r'\s+', ' ', text)  # Multiple spaces to single
@@ -153,11 +173,23 @@ def clean_ai_language(text: str) -> Tuple[str, List[str]]:
     text = text.strip()
     
     # Add authoritative beginning if text seems weak
-    weak_beginnings = [r'^well,', r'^so,', r'^basically,', r'^essentially,']
+    weak_beginnings = [r'^well,', r'^so,', r'^basically,', r'^essentially,', r'^rather,']
     for pattern in weak_beginnings:
         if re.search(pattern, text, re.IGNORECASE):
             text = re.sub(pattern, '', text, flags=re.IGNORECASE).strip()
             transformation_notes.append(f"Removed weak beginning: '{pattern}'")
+    
+    # If text starts with uncertainty, make it more definitive
+    uncertainty_starters = [
+        (r'^(?:it would seem|it appears|it seems) that', ''),
+        (r'^(?:the evidence suggests|research indicates) that', ''),
+        (r'^(?:one could argue|one might say) that', ''),
+    ]
+    
+    for pattern, replacement in uncertainty_starters:
+        if re.search(pattern, text, re.IGNORECASE):
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE).strip()
+            transformation_notes.append(f"Removed uncertain starter: '{pattern}'")
     
     return text, transformation_notes
 
@@ -327,20 +359,59 @@ def enhance_scholarly_content(text: str, magis_chunks: List[MagisChunkResult]) -
     
     return enhanced_text
 
-def add_catholic_perspective_framing(text: str) -> str:
-    """Add Catholic perspective framing when contrasting views are present"""
+def add_catholic_authority_framing(text: str, question: str) -> str:
+    """Add appropriate Catholic teaching authority to responses when needed"""
     
-    # Look for secular vs Catholic distinctions
-    if re.search(r'(secular|non-religious|atheist|materialist)', text, re.IGNORECASE):
-        # Already has contrasting perspectives, ensure Catholic view is clear
-        catholic_phrases = [
-            (r'(the church teaches)', r'**the Catholic Church teaches**'),
-            (r'(catholic teaching)', r'**Catholic teaching**'),
-            (r'(church doctrine)', r'**Church doctrine**'),
-        ]
-        
-        for pattern, replacement in catholic_phrases:
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    # If text is too short or already has strong Catholic framing, don't add more
+    if len(text) < 50 or re.search(r'the catholic church (?:teaches|holds|maintains)', text, re.IGNORECASE):
+        return text
+    
+    # Detect topics that need Catholic teaching authority
+    moral_topics = [
+        'abortion', 'euthanasia', 'contraception', 'marriage', 'divorce', 'sexuality',
+        'homosexuality', 'gender', 'embryo', 'stem cell', 'cloning', 'suicide',
+        'war', 'capital punishment', 'social justice', 'poverty', 'economics'
+    ]
+    
+    theological_topics = [
+        'god', 'trinity', 'incarnation', 'salvation', 'grace', 'sin', 'heaven',
+        'hell', 'purgatory', 'mary', 'saints', 'prayer', 'mass', 'eucharist',
+        'sacraments', 'pope', 'church', 'scripture', 'tradition'
+    ]
+    
+    question_lower = question.lower()
+    text_lower = text.lower()
+    
+    # Determine if this is a moral or theological topic
+    is_moral_topic = any(topic in question_lower for topic in moral_topics)
+    is_theological_topic = any(topic in question_lower for topic in theological_topics)
+    
+    # Add appropriate Catholic framing
+    if is_moral_topic:
+        # For moral issues, emphasize definitive teaching
+        if 'abortion' in question_lower:
+            if not re.search(r'catholic church|church teaching|magisterium', text_lower):
+                text = "The Catholic Church teaches definitively that " + text.lower()
+        elif any(topic in question_lower for topic in ['euthanasia', 'suicide', 'killing']):
+            if not re.search(r'catholic church|church teaching', text_lower):
+                text = "According to Catholic moral teaching, " + text
+        else:
+            # General moral topics
+            if not re.search(r'catholic|church|moral teaching', text_lower):
+                text = "Catholic moral theology establishes that " + text
+                
+    elif is_theological_topic:
+        # For theological topics, emphasize doctrine and tradition
+        if not re.search(r'catholic|church|doctrine|tradition|scripture', text_lower):
+            text = "Catholic doctrine affirms that " + text
+    
+    # Capitalize first letter after adding prefix
+    if text and len(text) > 1:
+        # Find the first letter after any added prefix
+        match = re.search(r'([a-z])', text)
+        if match:
+            pos = match.start()
+            text = text[:pos] + text[pos].upper() + text[pos+1:]
     
     return text
 
@@ -396,7 +467,25 @@ async def get_detailed_source_content(source_ids: List[str]) -> List[MagisChunkR
         logger.error(f"❌ Error in get_detailed_source_content: {e}")
         return detailed_sources
 
-async def transform_to_magisai_response(raw_response: str, magis_chunks: List[MagisChunkResult], include_debug: bool = False) -> Dict[str, Any]:
+def add_catholic_perspective_emphasis(text: str) -> str:
+    """Emphasize Catholic perspective when contrasting views are present"""
+    
+    # Look for secular vs Catholic distinctions and emphasize Catholic teaching
+    if re.search(r'(secular|non-religious|atheist|materialist)', text, re.IGNORECASE):
+        # Already has contrasting perspectives, ensure Catholic view is clear
+        catholic_phrases = [
+            (r'(the church teaches)', r'**the Catholic Church teaches**'),
+            (r'(catholic teaching)', r'**Catholic teaching**'),
+            (r'(church doctrine)', r'**Church doctrine**'),
+            (r'(magisterium)', r'**the Magisterium**'),
+        ]
+        
+        for pattern, replacement in catholic_phrases:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    
+    return text
+
+async def transform_to_magisai_response(raw_response: str, magis_chunks: List[MagisChunkResult], question: str, include_debug: bool = False) -> Dict[str, Any]:
     """Transform raw agent response into authoritative MagisAI format"""
     
     transformation_notes = []
@@ -416,8 +505,9 @@ async def transform_to_magisai_response(raw_response: str, magis_chunks: List[Ma
     # Step 4: Enhance scholarly content
     enhanced_text = enhance_scholarly_content(cleaned_text, magis_chunks)
     
-    # Step 5: Add Catholic perspective framing
-    final_text = add_catholic_perspective_framing(enhanced_text)
+    # Step 5: Add Catholic authority framing and perspective
+    authority_framed_text = add_catholic_authority_framing(enhanced_text, question)
+    final_text = add_catholic_perspective_emphasis(authority_framed_text)
     
     return {
         "transformed_answer": final_text,
@@ -466,7 +556,7 @@ async def query_with_magisai_transformation(question: str, include_debug: bool =
         # Transform to MagisAI format
         logger.info("🎭 Transforming to MagisAI persona...")
         transformation_result = await transform_to_magisai_response(
-            raw_answer, detailed_sources, include_debug
+            raw_answer, detailed_sources, question, include_debug
         )
         
         logger.info(f"✅ MagisAI transformation completed successfully")
