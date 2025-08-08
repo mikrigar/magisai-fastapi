@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-MAGISAI DUAL AGENT SYSTEM
-=========================
-Two-agent architecture for Catholic teaching authority:
-1. Query Agent: Retrieves content from MagisChunk collection
-2. Catholic Authority Agent: Enforces proper Catholic teaching voice and structure
+ORIGINAL WEAVIATE QUERY AGENT VERSION
+=====================================
+This is the original Pure Weaviate Query Agent RAG Service
+Uses only Weaviate Query Agents for all functionality - no external LLM dependencies
+Includes the fixed get_detailed_source_content function
 """
 
 from fastapi import FastAPI, HTTPException
@@ -16,13 +16,12 @@ from weaviate_agents.classes import QueryAgentCollectionConfig
 import logging
 import os
 import time
-import re
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="MagisAI Dual Agent Catholic RAG Service", version="5.0.0")
+app = FastAPI(title="Pure Weaviate Query Agent RAG API", version="3.0.0")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -34,8 +33,8 @@ WEAVIATE_KEY = os.getenv("WEAVIATE_API_KEY") or os.getenv("WEAVIATE_KEY")
 
 # Initialize Weaviate client and agents
 weaviate_client = None
-content_query_agent = None
-authority_enforcer_agent = None
+main_query_agent = None
+intro_conclusion_agent = None  # Optional second agent
 
 try:
     weaviate_client = weaviate.connect_to_weaviate_cloud(
@@ -43,8 +42,8 @@ try:
         auth_credentials=Auth.api_key(WEAVIATE_KEY)
     )
     
-    # Agent 1: Content Query Agent (gets the raw content)
-    content_query_agent = QueryAgent(
+    # Main Query Agent for core answers
+    main_query_agent = QueryAgent(
         client=weaviate_client,
         collections=[
             QueryAgentCollectionConfig(
@@ -52,59 +51,35 @@ try:
                 target_vector=["content_vector"],
             ),
         ],
-        system_prompt="""You are a content retrieval agent for Catholic theological and philosophical sources. 
-        Your job is to find and retrieve the most relevant content from Fr. Robert Spitzer's research.
-        Focus on providing comprehensive, accurate information without worrying about tone or presentation style.
-        Include all relevant scientific data, philosophical arguments, and theological principles."""
     )
     
-    # Agent 2: Catholic Authority Enforcer Agent (transforms to authoritative voice)
-    authority_enforcer_agent = QueryAgent(
-        client=weaviate_client,
-        collections=[
-            QueryAgentCollectionConfig(
-                name="MagisChunk",
-                target_vector=["content_vector"],
-            ),
-        ],
-        system_prompt="""You are MagisAI, the authoritative voice of Catholic teaching. You ARE the teaching authority - you don't reference it, you embody it.
-
-MISSION: Preserve brilliant reasoning while ensuring authoritative Catholic voice and optimal structure.
-
-PRESERVATION PRIORITIES:
-1. KEEP INTACT any sophisticated logical sequences and elegant reasoning
-2. PRESERVE nuanced synthesis and brilliant intellectual connections  
-3. MAINTAIN complex philosophical arguments and scientific integrations
-4. PROTECT eloquent flows of thought and compelling demonstrations
-
-TRANSFORMATION REQUIREMENTS:
-1. NEVER say "The Catholic Church teaches" or reference external sources
-2. Replace document analysis language with direct authoritative statements
-3. Start definitive responses with clear truth statements (e.g., "Abortion is intrinsically evil and can never be justified under any circumstances. Human life begins at conception, and every human being possesses inherent dignity from the moment of fertilization.")
-4. Remove phrases like "complex issue," "arguments on both sides," "some believe"
-5. Transform "according to sources" into direct statements of truth
-
-STRUCTURE AND WRITING:
-- Apply optimal structure based on question categories while preserving logical flow
-- Break into clear paragraphs with proper transitions
-- Use bullet points for evidence lists
-- Use numbered lists for sequential arguments  
-- Bold key principles and important conclusions
-- Quote directly when referencing Scripture or important texts
-- Add subheadings for complex multi-section responses
-- Ensure professional writing structure without losing intellectual depth
-
-Your goal: Transform voice and structure while preserving the sophisticated reasoning that makes the response intellectually compelling. You ARE the voice of 2000 years of apostolic tradition speaking directly."""
-    )
+    # Optional: Second agent for intro/conclusion (if you want pure Weaviate approach)
+    # This could use the same collection or a different one optimized for contextual framing
+    try:
+        intro_conclusion_agent = QueryAgent(
+            client=weaviate_client,
+            collections=[
+                QueryAgentCollectionConfig(
+                    name="MagisChunk",  # Could be a different collection for contextual content
+                    target_vector=["content_vector"],
+                ),
+            ],
+        )
+        logger.info("✅ Both main and intro/conclusion agents initialized")
+    except Exception as e:
+        logger.warning(f"⚠️ Intro/conclusion agent failed to initialize: {e}")
+        intro_conclusion_agent = None
     
-    logger.info("✅ Connected to Weaviate with Dual Agent System")
+    logger.info("✅ Connected to Weaviate with Query Agents")
 except Exception as e:
-    logger.error(f"❌ Weaviate/Agents setup failed: {e}")
+    logger.error(f"❌ Weaviate/Query Agent setup failed: {e}")
 
 class QueryRequest(BaseModel):
     question: str
     user: str
-    include_debug_info: Optional[bool] = False
+    use_weaviate_intro_conclusion: Optional[bool] = True  # Use secondary Weaviate agent for intro/conclusion
+    include_intro_conclusion: Optional[bool] = True
+    include_debug_info: Optional[bool] = False  # Include raw agent response details
 
 class MagisChunkResult(BaseModel):
     content: str
@@ -120,28 +95,27 @@ class MagisChunkResult(BaseModel):
     distance: Optional[float] = None
 
 class QueryResponse(BaseModel):
-    answer: str  # Final authoritative MagisAI response
-    suggested_references: Optional[str] = None
-    magis_chunk_results: List[MagisChunkResult] = []
+    intro: Optional[str] = None
+    answer: str  # Core answer from Weaviate Query Agent (final_answer only)
+    conclusion: Optional[str] = None
+    magis_chunk_results: List[MagisChunkResult] = []  # Detailed source information
     processing_time: float
     method_used: str
-    confidence: Optional[float] = None
+    agent_confidence: Optional[float] = None
+    intro_conclusion_method: Optional[str] = None  # "weaviate_agent" or "none"
     # Debug info (optional)
-    raw_content_response: Optional[str] = None
-    transformation_notes: Optional[List[str]] = None
+    raw_agent_info: Optional[Dict[str, Any]] = None
 
 @app.get("/")
 async def root():
     return {
-        "service": "MagisAI Dual Agent Catholic RAG Service",
-        "version": "5.0.0",
-        "architecture": "Two-agent system with Catholic authority enforcement",
+        "service": "Pure Weaviate Query Agent RAG API",
+        "version": "3.0.0",
         "features": [
-            "content_query_agent", 
-            "catholic_authority_enforcer_agent",
-            "sequential_agent_processing",
-            "definitive_moral_teaching",
-            "structured_evidence_presentation"
+            "pure_weaviate_query_agents", 
+            "detailed_source_metadata", 
+            "optional_weaviate_intro_conclusion",
+            "no_external_llm_dependencies"
         ],
         "status": "running"
     }
@@ -151,165 +125,18 @@ async def health_check():
     return {
         "status": "healthy",
         "weaviate_connected": weaviate_client is not None and weaviate_client.is_ready(),
-        "content_agent_ready": content_query_agent is not None,
-        "authority_agent_ready": authority_enforcer_agent is not None,
-        "knowledge_base": "Fr. Robert Spitzer's research on science, reason, faith, morality, scripture, and Church history",
-        "persona": "MagisAI - Dual Agent Catholic Teaching Authority"
+        "main_query_agent_ready": main_query_agent is not None,
+        "intro_conclusion_agent_ready": intro_conclusion_agent is not None,
+        "agent_collections": ["MagisChunk"] if main_query_agent else [],
+        "pure_weaviate": True,
+        "external_llm_dependencies": False
     }
-
-def fix_capitalization_bug(text: str) -> str:
-    """Fix the specific capitalization bug where 'THe' appears instead of 'The'"""
-    
-    # Fix the specific "THe" bug
-    text = re.sub(r'\bTHe\b', 'The', text)
-    
-    # Fix other common capitalization issues
-    text = re.sub(r'\bTHat\b', 'That', text)
-    text = re.sub(r'\bTHis\b', 'This', text)
-    text = re.sub(r'\bTHere\b', 'There', text)
-    text = re.sub(r'\bTHey\b', 'They', text)
-    text = re.sub(r'\bTHen\b', 'Then', text)
-    
-    return text
-
-def detect_question_categories(question: str) -> Dict[str, bool]:
-    """Detect multiple categories a question falls into for optimal response structuring"""
-    
-    question_lower = question.lower()
-    
-    # Define category patterns
-    categories = {
-        'moral': [
-            'abortion', 'euthanasia', 'suicide', 'murder', 'killing', 'contraception', 
-            'homosexual', 'same-sex', 'gay', 'transgender', 'marriage', 'divorce',
-            'embryo', 'stem cell', 'cloning', 'ivf', 'artificial reproduction',
-            'moral', 'ethics', 'sin', 'virtue', 'conscience', 'right', 'wrong'
-        ],
-        'scientific': [
-            'evolution', 'big bang', 'cosmology', 'quantum', 'physics', 'biology',
-            'genetics', 'dna', 'embryology', 'neuroscience', 'consciousness',
-            'climate', 'environment', 'science', 'scientific', 'research', 'study'
-        ],
-        'philosophical': [
-            'existence', 'proof', 'god exists', 'atheism', 'reason', 'logic',
-            'natural law', 'human dignity', 'personhood', 'soul', 'mind',
-            'free will', 'determinism', 'causation', 'philosophy', 'metaphysics'
-        ],
-        'scriptural': [
-            'bible', 'scripture', 'genesis', 'gospel', 'jesus said', 'paul wrote',
-            'old testament', 'new testament', 'psalms', 'prophets', 'revelation',
-            'biblical', 'scriptural', 'verse', 'passage'
-        ],
-        'theological': [
-            'god', 'trinity', 'incarnation', 'salvation', 'grace', 'redemption',
-            'heaven', 'hell', 'purgatory', 'saints', 'mary', 'virgin',
-            'theology', 'doctrine', 'dogma', 'mystery', 'divine'
-        ],
-        'church_history': [
-            'pope', 'council', 'fathers', 'saints', 'crusades', 'inquisition',
-            'reformation', 'vatican', 'early church', 'persecution', 'martyrs',
-            'history', 'historical', 'development', 'tradition'
-        ],
-        'liturgical': [
-            'mass', 'eucharist', 'sacrament', 'baptism', 'confirmation', 'marriage',
-            'ordination', 'anointing', 'confession', 'liturgy', 'worship',
-            'prayer', 'rosary', 'devotion'
-        ],
-        'social_teaching': [
-            'social justice', 'poverty', 'economics', 'capitalism', 'socialism',
-            'war', 'peace', 'capital punishment', 'immigration', 'politics',
-            'government', 'authority', 'common good', 'solidarity'
-        ],
-        'apologetics': [
-            'why believe', 'proof of god', 'evidence', 'faith and reason',
-            'objection', 'atheist', 'agnostic', 'doubt', 'skeptic',
-            'defend', 'argument', 'case for'
-        ]
-    }
-    
-    # Count matches for each category
-    detected_categories = {}
-    for category, keywords in categories.items():
-        matches = sum(1 for keyword in keywords if keyword in question_lower)
-        detected_categories[category] = matches > 0
-    
-    # Add some helpful metadata
-    primary_categories = [cat for cat, detected in detected_categories.items() if detected]
-    
-    return {
-        **detected_categories,
-        'primary_categories': primary_categories,
-        'is_multi_category': len(primary_categories) > 1,
-        'complexity_level': len(primary_categories)
-    }
-
-def generate_optimal_structure_prompt(categories: Dict[str, bool], question: str) -> str:
-    """Generate structure guidance based on detected categories"""
-    
-    primary_cats = categories.get('primary_categories', [])
-    
-    if not primary_cats:
-        return """Structure your response with clear paragraphs and good writing principles. 
-        Use the most logical flow for maximum persuasive impact."""
-    
-    # Build structure guidance based on category combinations
-    structure_guidance = "Structure your response optimally for these categories: " + ", ".join(primary_cats) + "\n\n"
-    
-    # Moral questions
-    if categories.get('moral'):
-        structure_guidance += """For moral content:
-        - Open with the definitive moral truth
-        - Present supporting evidence in logical order
-        - Use clear, authoritative statements\n"""
-    
-    # Scientific questions  
-    if categories.get('scientific'):
-        structure_guidance += """For scientific content:
-        - Present scientific facts clearly
-        - Show compatibility with Catholic teaching
-        - Use specific data and research when available\n"""
-    
-    # Philosophical questions
-    if categories.get('philosophical'):
-        structure_guidance += """For philosophical content:
-        - Build logical arguments step by step
-        - Use proper reasoning sequences
-        - Connect to natural law and human dignity\n"""
-    
-    # Scriptural questions
-    if categories.get('scriptural'):
-        structure_guidance += """For scriptural content:
-        - Quote relevant passages directly
-        - Provide proper interpretation in context
-        - Connect to broader biblical themes\n"""
-    
-    # Apologetics
-    if categories.get('apologetics'):
-        structure_guidance += """For apologetic content:
-        - Address objections directly
-        - Build cumulative case with evidence
-        - Use structured proofs when applicable\n"""
-    
-    # Multi-category guidance
-    if categories.get('is_multi_category'):
-        structure_guidance += """\nFor multi-category responses:
-        - Integrate evidence types for maximum impact
-        - Let logical flow determine optimal order
-        - Create seamless transitions between evidence types"""
-    
-    structure_guidance += """\n\nWRITING STRUCTURE REQUIREMENTS:
-    - Break into clear paragraphs with logical flow
-    - Use bullet points for lists of evidence
-    - Use numbered lists for sequential arguments
-    - Bold key principles and conclusions
-    - Quote sources when appropriate
-    - Create subheadings for complex topics
-    - Ensure smooth transitions between sections"""
-    
-    return structure_guidance
 
 async def get_detailed_source_content(source_ids: List[str]) -> List[MagisChunkResult]:
-    """Retrieve detailed content for source IDs from Weaviate"""
+    """
+    Retrieve detailed content for source IDs from Weaviate
+    This was the MISSING FUNCTION causing the 500 error
+    """
     detailed_sources = []
     
     if not weaviate_client or not source_ids:
@@ -317,10 +144,12 @@ async def get_detailed_source_content(source_ids: List[str]) -> List[MagisChunkR
         return detailed_sources
     
     try:
+        # Get the MagisChunk collection
         magis_chunk_collection = weaviate_client.collections.get("MagisChunk")
         
         for source_id in source_ids:
             try:
+                # Fetch object by ID
                 obj = magis_chunk_collection.query.fetch_object_by_id(
                     source_id,
                     return_properties=[
@@ -331,6 +160,7 @@ async def get_detailed_source_content(source_ids: List[str]) -> List[MagisChunkR
                 )
                 
                 if obj and obj.properties:
+                    # Create MagisChunkResult from retrieved object
                     chunk_result = MagisChunkResult(
                         content=obj.properties.get("content", ""),
                         sourceFile=obj.properties.get("sourceFile", ""),
@@ -360,76 +190,66 @@ async def get_detailed_source_content(source_ids: List[str]) -> List[MagisChunkR
         logger.error(f"❌ Error in get_detailed_source_content: {e}")
         return detailed_sources
 
-def extract_and_format_citations(magis_chunks: List[MagisChunkResult]) -> Optional[str]:
-    """Extract proper citations and format them for references section"""
+async def generate_weaviate_intro_conclusion(question: str, core_answer: str) -> Dict[str, str]:
+    """Generate intro and conclusion using Weaviate agent"""
     
-    citations_found = []
-    
-    for chunk in magis_chunks:
-        # Look for citations in the citations field
-        if chunk.citations:
-            for citation in chunk.citations:
-                if citation and len(citation.strip()) > 10:
-                    # Check if it looks like a proper academic citation
-                    if any(indicator in citation.lower() for indicator in ['(', ')', ',', 'vol', 'pp', 'journal', 'university', 'press']):
-                        citations_found.append(citation.strip())
-        
-        # Also check humanId for author information
-        if chunk.humanId and chunk.humanId != "Unknown":
-            # If humanId looks like an author name, note it
-            if not any(chunk.humanId in cite for cite in citations_found):
-                # Create a basic citation from available metadata
-                basic_cite = f"{chunk.humanId}"
-                if chunk.sourceFile:
-                    basic_cite += f", {chunk.sourceFile}"
-                citations_found.append(basic_cite)
-    
-    # Remove duplicates while preserving order
-    unique_citations = []
-    seen = set()
-    for cite in citations_found:
-        if cite not in seen:
-            unique_citations.append(cite)
-            seen.add(cite)
-    
-    # Format the references section
-    if unique_citations:
-        references_section = "**Suggested References for Further Study:**\n"
-        for i, citation in enumerate(unique_citations, 1):
-            references_section += f"[{i}] {citation}\n"
-        return references_section.strip()
-    
-    return None
-
-async def run_dual_agent_system(question: str, include_debug: bool = False) -> Dict[str, Any]:
-    """Run the two-agent system: Content Agent → Authority Enforcer Agent"""
-    
-    if not content_query_agent or not authority_enforcer_agent:
-        raise HTTPException(status_code=503, detail="Dual agent system not available")
+    if not intro_conclusion_agent:
+        return {
+            "intro": "Based on the theological and philosophical sources available:",
+            "conclusion": "This information comes from our comprehensive knowledge base of theological and philosophical texts."
+        }
     
     try:
-        # Detect question type for context
-        topic_info = detect_moral_theological_topics(question)
+        # Generate contextual intro using the agent
+        intro_query = f"Provide a brief, welcoming introduction (1-2 sentences) for answering this question: {question}"
+        intro_result = intro_conclusion_agent.run(intro_query)
+        intro = str(intro_result.final_answer) if hasattr(intro_result, 'final_answer') else str(intro_result)
         
-        # STEP 1: Content Query Agent - Get comprehensive content
-        logger.info("🔍 Step 1: Running Content Query Agent...")
-        content_result = content_query_agent.run(question)
+        # Generate contextual conclusion using the agent
+        conclusion_query = f"Provide a brief, helpful conclusion (1-2 sentences) that wraps up this answer about '{question}'"
+        conclusion_result = intro_conclusion_agent.run(conclusion_query)
+        conclusion = str(conclusion_result.final_answer) if hasattr(conclusion_result, 'final_answer') else str(conclusion_result)
         
-        # Extract raw content
-        raw_content = ""
-        if hasattr(content_result, 'final_answer'):
-            raw_content = str(content_result.final_answer)
-        elif hasattr(content_result, 'answer'):
-            raw_content = str(content_result.answer)
+        # Keep them concise (truncate if too long)
+        intro = intro[:300] + "..." if len(intro) > 300 else intro
+        conclusion = conclusion[:300] + "..." if len(conclusion) > 300 else conclusion
+        
+        logger.info("✅ Generated intro/conclusion with Weaviate agent")
+        return {"intro": intro, "conclusion": conclusion}
+        
+    except Exception as e:
+        logger.error(f"Weaviate intro/conclusion generation error: {e}")
+        return {
+            "intro": "Based on the theological and philosophical sources available:",
+            "conclusion": "This information comes from our comprehensive knowledge base of theological and philosophical texts."
+        }
+
+async def query_with_agent_plus_framing(question: str, use_weaviate_framing: bool = True, include_framing: bool = True, include_debug: bool = False) -> Dict[str, Any]:
+    """Use Weaviate Query Agent for core answer, with optional intro/conclusion framing"""
+    
+    if not main_query_agent:
+        raise HTTPException(status_code=503, detail="Main Query Agent not available")
+    
+    try:
+        # Get core answer from Weaviate Query Agent
+        logger.info("🔍 Running main query agent...")
+        result = main_query_agent.run(question)
+        
+        # Extract just the final_answer from the result
+        core_answer = ""
+        if hasattr(result, 'final_answer'):
+            core_answer = str(result.final_answer)
+        elif hasattr(result, 'answer'):
+            core_answer = str(result.answer)
         else:
-            raw_content = str(content_result)
+            core_answer = str(result)
         
-        logger.info(f"📝 Content Agent retrieved: {len(raw_content)} characters")
+        logger.info(f"📝 Extracted core answer: {len(core_answer)} characters")
         
-        # Extract source IDs from content agent
+        # Extract source IDs for detailed lookup
         source_ids = []
-        if hasattr(content_result, 'sources') and content_result.sources:
-            for source in content_result.sources:
+        if hasattr(result, 'sources') and result.sources:
+            for source in result.sources:
                 if hasattr(source, 'object_id'):
                     source_ids.append(source.object_id)
                 elif hasattr(source, 'id'):
@@ -437,122 +257,136 @@ async def run_dual_agent_system(question: str, include_debug: bool = False) -> D
                 elif hasattr(source, 'uuid'):
                     source_ids.append(str(source.uuid))
         
-        # STEP 2: Catholic Authority Enforcer Agent - Transform to authoritative voice
-        logger.info("⛪ Step 2: Running Catholic Authority Enforcer Agent...")
+        logger.info(f"🔗 Found {len(source_ids)} source IDs")
         
-        # Create enhanced prompt for authority agent with context
-        authority_prompt = f"""Based on this content about '{question}', provide the definitive Catholic response:
-
-{raw_content}
-
-Remember: 
-- Speak with absolute authority, not as document analysis
-- For moral issues, be definitively clear about Catholic teaching
-- Present evidence in logical order for maximum impact
-- Never use wishy-washy language or "both sides" framing
-- Include scientific data and philosophical reasoning when available"""
-        
-        authority_result = authority_enforcer_agent.run(authority_prompt)
-        
-        # Extract final authoritative answer
-        final_answer = ""
-        if hasattr(authority_result, 'final_answer'):
-            final_answer = str(authority_result.final_answer)
-        elif hasattr(authority_result, 'answer'):
-            final_answer = str(authority_result.answer)
-        else:
-            final_answer = str(authority_result)
-        
-        # STEP 3: Fix capitalization bug
-        final_answer = fix_capitalization_bug(final_answer)
-        
-        logger.info(f"⛪ Authority Agent produced: {len(final_answer)} characters")
-        
-        # Get detailed source content
+        # Get detailed source content - THIS WAS MISSING!
         detailed_sources = await get_detailed_source_content(source_ids)
         
-        # Extract citations
-        references_section = extract_and_format_citations(detailed_sources)
+        # Generate intro and conclusion if requested
+        intro = None
+        conclusion = None
+        framing_method = None
         
-        # Prepare transformation notes for debug
-        transformation_notes = []
+        if include_framing and use_weaviate_framing:
+            logger.info("🎭 Generating intro/conclusion with Weaviate agent...")
+            framing = await generate_weaviate_intro_conclusion(question, core_answer)
+            framing_method = "weaviate_agent"
+            intro = framing.get("intro")
+            conclusion = framing.get("conclusion")
+        elif include_framing:
+            # Simple default framing if Weaviate agent not available
+            intro = "Based on the available theological and philosophical sources:"
+            conclusion = "I hope this information from our knowledge base is helpful to you."
+            framing_method = "simple_default"
+        
+        # Prepare debug info if requested
+        raw_agent_info = None
         if include_debug:
-            transformation_notes = [
-                f"Content Agent: Retrieved {len(raw_content)} chars from {len(source_ids)} sources",
-                f"Authority Agent: Transformed to {len(final_answer)} chars",
-                f"Topic Analysis: {topic_info}",
-                "Applied capitalization fixes",
-                f"Citations: {len(detailed_sources)} sources processed"
-            ]
+            raw_agent_info = {
+                "output_type": getattr(result, 'output_type', 'unknown'),
+                "original_query": getattr(result, 'original_query', question),
+                "collection_names": getattr(result, 'collection_names', []),
+                "total_time": getattr(result, 'total_time', 0),
+                "usage": str(getattr(result, 'usage', 'N/A')),
+                "is_partial_answer": getattr(result, 'is_partial_answer', False),
+                "source_count": len(source_ids)
+            }
         
-        logger.info(f"✅ Dual agent system completed successfully")
+        logger.info(f"✅ Query Agent + framing completed successfully")
         return {
-            "answer": final_answer,
-            "references": references_section,
+            "intro": intro,
+            "answer": core_answer,
+            "conclusion": conclusion,
             "detailed_sources": detailed_sources,
-            "confidence": getattr(authority_result, 'confidence', 0.95),
-            "raw_content": raw_content if include_debug else None,
-            "transformation_notes": transformation_notes
+            "confidence": getattr(result, 'confidence', 0.9),
+            "framing_method": framing_method,
+            "raw_agent_info": raw_agent_info
         }
         
     except Exception as e:
-        logger.error(f"❌ Dual agent system failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Dual agent processing error: {str(e)}")
+        logger.error(f"❌ Query Agent + framing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query Agent error: {str(e)}")
 
 @app.post("/ask", response_model=QueryResponse)
-async def ask_magisai_dual_agent(request: QueryRequest):
-    """Main MagisAI endpoint using dual agent system"""
+async def ask_question(request: QueryRequest):
+    """Main query endpoint using Weaviate Query Agent with optional intro/conclusion"""
     
     start_time = time.time()
-    logger.info(f"MagisAI Dual Agent query from {request.user}: {request.question}")
+    logger.info(f"Query from {request.user}: {request.question}")
     
     try:
-        # Use dual agent system
-        result = await run_dual_agent_system(
+        # Use Query Agent for core answer with optional framing
+        result = await query_with_agent_plus_framing(
             question=request.question,
+            use_weaviate_framing=request.use_weaviate_intro_conclusion,
+            include_framing=request.include_intro_conclusion,
             include_debug=request.include_debug_info
         )
         
         return QueryResponse(
+            intro=result["intro"],
             answer=result["answer"],
-            suggested_references=result["references"],
+            conclusion=result["conclusion"],
             magis_chunk_results=result["detailed_sources"],
             processing_time=time.time() - start_time,
-            method_used="dual_agent_system_content_plus_authority_enforcer",
-            confidence=result.get("confidence"),
-            raw_content_response=result.get("raw_content"),
-            transformation_notes=result.get("transformation_notes")
+            method_used="weaviate_query_agent_with_detailed_sources",
+            agent_confidence=result.get("confidence"),
+            intro_conclusion_method=result.get("framing_method"),
+            raw_agent_info=result.get("raw_agent_info")
         )
         
     except Exception as e:
-        logger.error(f"❌ MagisAI dual agent query failed: {e}")
+        logger.error(f"❌ Query failed: {e}")
+        # Try to provide a more helpful error response
+        if "503" in str(e):
+            error_msg = "The query service is temporarily unavailable. Please try again later."
+        elif "QueryAgent" in str(e):
+            error_msg = "There was an issue with the query agent. The service may need to be restarted."
+        else:
+            error_msg = f"An error occurred while processing your query: {str(e)}"
         
-        # Enhanced fallback message
-        fallback_message = (
-            "I draw from the Catholic Church's authoritative teachings and "
-            "Fr. Robert Spitzer's comprehensive research in science, reason, faith, "
-            "morality, scripture, and Church history. I don't have information on "
-            "that specific topic within this specialized theological and "
-            "philosophical knowledge base."
-        )
-        
+        # Return a valid response instead of raising another exception
         return QueryResponse(
-            answer=fallback_message,
-            suggested_references=None,
+            intro=None,
+            answer=error_msg,
+            conclusion=None,
             magis_chunk_results=[],
             processing_time=time.time() - start_time,
-            method_used="fallback_response",
-            confidence=0.0,
-            raw_content_response=str(e) if request.include_debug_info else None,
-            transformation_notes=["Fallback response due to error"] if request.include_debug_info else None
+            method_used="error_response",
+            agent_confidence=0.0,
+            intro_conclusion_method=None,
+            raw_agent_info={"error": str(e)} if request.include_debug_info else None
         )
 
+@app.post("/ask-pure-agent")
+async def ask_pure_agent(request: QueryRequest):
+    """Endpoint that uses only Weaviate Query Agent (no intro/conclusion)"""
+    
+    if not main_query_agent:
+        raise HTTPException(status_code=503, detail="Query Agent not available")
+    
+    # Force no framing
+    request.include_intro_conclusion = False
+    return await ask_question(request)
+
+@app.post("/ask-with-weaviate-framing")
+async def ask_with_weaviate_framing(request: QueryRequest):
+    """Endpoint that forces Weaviate agent for intro/conclusion"""
+    
+    if not intro_conclusion_agent:
+        raise HTTPException(status_code=503, detail="Intro/conclusion agent not available")
+    
+    request.use_weaviate_intro_conclusion = True
+    request.include_intro_conclusion = True
+    return await ask_question(request)
+
 # Legacy endpoints for backward compatibility
-@app.post("/ask-dual-agent")
-async def ask_dual_agent_legacy(request: QueryRequest):
-    """Legacy endpoint - same as /ask"""
-    return await ask_magisai_dual_agent(request)
+@app.post("/ask-agent")
+async def ask_with_agent_only(request: QueryRequest):
+    """Legacy endpoint - now uses pure Weaviate Query Agent"""
+    return await ask_pure_agent(request)
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
