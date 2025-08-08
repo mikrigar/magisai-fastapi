@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-MAGISAI ENHANCED WEAVIATE QUERY AGENT
-====================================
-Enhanced version with MagisAI persona and post-processing
-- Transforms responses to authoritative Catholic voice
-- Extracts and formats scholarly citations with footnotes
-- Removes AI-like language and adds intellectual rigor
-- Based on Fr. Robert Spitzer's research and Catholic teaching
+MAGISAI DUAL AGENT SYSTEM
+=========================
+Two-agent architecture for Catholic teaching authority:
+1. Query Agent: Retrieves content from MagisChunk collection
+2. Catholic Authority Agent: Enforces proper Catholic teaching voice and structure
 """
 
 from fastapi import FastAPI, HTTPException
@@ -24,7 +22,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="MagisAI Catholic RAG Service", version="4.0.0")
+app = FastAPI(title="MagisAI Dual Agent Catholic RAG Service", version="5.0.0")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +34,8 @@ WEAVIATE_KEY = os.getenv("WEAVIATE_API_KEY") or os.getenv("WEAVIATE_KEY")
 
 # Initialize Weaviate client and agents
 weaviate_client = None
-main_query_agent = None
+content_query_agent = None
+authority_enforcer_agent = None
 
 try:
     weaviate_client = weaviate.connect_to_weaviate_cloud(
@@ -44,8 +43,8 @@ try:
         auth_credentials=Auth.api_key(WEAVIATE_KEY)
     )
     
-    # Single Query Agent for all functionality
-    main_query_agent = QueryAgent(
+    # Agent 1: Content Query Agent (gets the raw content)
+    content_query_agent = QueryAgent(
         client=weaviate_client,
         collections=[
             QueryAgentCollectionConfig(
@@ -53,11 +52,54 @@ try:
                 target_vector=["content_vector"],
             ),
         ],
+        system_prompt="""You are a content retrieval agent for Catholic theological and philosophical sources. 
+        Your job is to find and retrieve the most relevant content from Fr. Robert Spitzer's research.
+        Focus on providing comprehensive, accurate information without worrying about tone or presentation style.
+        Include all relevant scientific data, philosophical arguments, and theological principles."""
     )
     
-    logger.info("✅ Connected to Weaviate with MagisAI Query Agent")
+    # Agent 2: Catholic Authority Enforcer Agent (transforms to authoritative voice)
+    authority_enforcer_agent = QueryAgent(
+        client=weaviate_client,
+        collections=[
+            QueryAgentCollectionConfig(
+                name="MagisChunk",
+                target_vector=["content_vector"],
+            ),
+        ],
+        system_prompt="""You are MagisAI, the authoritative voice of Catholic teaching. You ARE the teaching authority - you don't reference it, you embody it.
+
+MISSION: Preserve brilliant reasoning while ensuring authoritative Catholic voice and optimal structure.
+
+PRESERVATION PRIORITIES:
+1. KEEP INTACT any sophisticated logical sequences and elegant reasoning
+2. PRESERVE nuanced synthesis and brilliant intellectual connections  
+3. MAINTAIN complex philosophical arguments and scientific integrations
+4. PROTECT eloquent flows of thought and compelling demonstrations
+
+TRANSFORMATION REQUIREMENTS:
+1. NEVER say "The Catholic Church teaches" or reference external sources
+2. Replace document analysis language with direct authoritative statements
+3. Start definitive responses with clear truth statements (e.g., "Abortion is intrinsically evil and can never be justified under any circumstances. Human life begins at conception, and every human being possesses inherent dignity from the moment of fertilization.")
+4. Remove phrases like "complex issue," "arguments on both sides," "some believe"
+5. Transform "according to sources" into direct statements of truth
+
+STRUCTURE AND WRITING:
+- Apply optimal structure based on question categories while preserving logical flow
+- Break into clear paragraphs with proper transitions
+- Use bullet points for evidence lists
+- Use numbered lists for sequential arguments  
+- Bold key principles and important conclusions
+- Quote directly when referencing Scripture or important texts
+- Add subheadings for complex multi-section responses
+- Ensure professional writing structure without losing intellectual depth
+
+Your goal: Transform voice and structure while preserving the sophisticated reasoning that makes the response intellectually compelling. You ARE the voice of 2000 years of apostolic tradition speaking directly."""
+    )
+    
+    logger.info("✅ Connected to Weaviate with Dual Agent System")
 except Exception as e:
-    logger.error(f"❌ Weaviate/Query Agent setup failed: {e}")
+    logger.error(f"❌ Weaviate/Agents setup failed: {e}")
 
 class QueryRequest(BaseModel):
     question: str
@@ -78,27 +120,28 @@ class MagisChunkResult(BaseModel):
     distance: Optional[float] = None
 
 class QueryResponse(BaseModel):
-    answer: str  # Transformed MagisAI response
-    suggested_references: Optional[str] = None  # Formatted citations section
+    answer: str  # Final authoritative MagisAI response
+    suggested_references: Optional[str] = None
     magis_chunk_results: List[MagisChunkResult] = []
     processing_time: float
     method_used: str
     confidence: Optional[float] = None
     # Debug info (optional)
-    raw_agent_response: Optional[str] = None
+    raw_content_response: Optional[str] = None
     transformation_notes: Optional[List[str]] = None
 
 @app.get("/")
 async def root():
     return {
-        "service": "MagisAI Catholic RAG Service",
-        "version": "4.0.0",
-        "persona": "Authoritative Catholic expert based on Fr. Robert Spitzer's research",
+        "service": "MagisAI Dual Agent Catholic RAG Service",
+        "version": "5.0.0",
+        "architecture": "Two-agent system with Catholic authority enforcement",
         "features": [
-            "magisai_persona_transformation", 
-            "scholarly_citation_formatting",
-            "catholic_authoritative_voice",
-            "fr_spitzer_knowledge_base"
+            "content_query_agent", 
+            "catholic_authority_enforcer_agent",
+            "sequential_agent_processing",
+            "definitive_moral_teaching",
+            "structured_evidence_presentation"
         ],
         "status": "running"
     }
@@ -108,312 +151,162 @@ async def health_check():
     return {
         "status": "healthy",
         "weaviate_connected": weaviate_client is not None and weaviate_client.is_ready(),
-        "magisai_agent_ready": main_query_agent is not None,
+        "content_agent_ready": content_query_agent is not None,
+        "authority_agent_ready": authority_enforcer_agent is not None,
         "knowledge_base": "Fr. Robert Spitzer's research on science, reason, faith, morality, scripture, and Church history",
-        "persona": "MagisAI - Catholic teaching authority"
+        "persona": "MagisAI - Dual Agent Catholic Teaching Authority"
     }
 
-def clean_ai_language(text: str) -> Tuple[str, List[str]]:
-    """Remove AI-like phrases and transform to authoritative Catholic voice"""
+def fix_capitalization_bug(text: str) -> str:
+    """Fix the specific capitalization bug where 'THe' appears instead of 'The'"""
     
-    transformation_notes = []
-    original_text = text
+    # Fix the specific "THe" bug
+    text = re.sub(r'\bTHe\b', 'The', text)
     
-    # Document/source reference patterns that undermine authority
-    document_patterns = [
-        (r"^the documents? (?:and search results )?(?:do not present|present|show|indicate|suggest)", ""),
-        (r"^(?:based on )?the (?:sources?|documents?|information) (?:provided|available|presented)", ""),
-        (r"^the (?:search results|data|sources?) (?:show|indicate|suggest|reveal)", ""),
-        (r"^according to the (?:documents?|sources?|search results)", ""),
-        (r"^the (?:available )?information (?:suggests?|indicates?|shows?)", ""),
-        (r"^from the (?:sources?|documents?|materials?) (?:provided|available)", ""),
-        (r"therefore,? based on the (?:information|sources?) available", "therefore"),
-    ]
-    
-    # Standard AI patterns to remove or replace
-    ai_patterns = [
-        (r"according to the data", ""),
-        (r"from the sources provided", ""),
-        (r"some say", ""),
-        (r"the system found", ""),
-        (r"from my training", ""),
-        (r"as an ai", ""),
-        (r"i am an ai", ""),
-        (r"according to my knowledge", ""),
-        (r"based on my understanding", ""),
-        (r"the information suggests", ""),
-        (r"it appears that", ""),
-        (r"it seems that", ""),
-        (r"from what i can tell", ""),
-        (r"in my analysis", ""),
-        (r"the data indicates", ""),
-        (r"sources suggest", ""),
-        (r"according to sources", ""),
-        (r"based on available information", ""),
-        (r"the sources argue", ""),
-        (r"the documents indicate", ""),
-        (r"search results show", ""),
-    ]
-    
-    # Apply document pattern transformations first (these are most critical)
-    for pattern, replacement in document_patterns:
-        if re.search(pattern, text, re.IGNORECASE):
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-            transformation_notes.append(f"Removed document reference: '{pattern}'")
-    
-    # Apply standard AI transformations
-    for pattern, replacement in ai_patterns:
-        if re.search(pattern, text, re.IGNORECASE):
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-            transformation_notes.append(f"Removed AI language: '{pattern}'")
-    
-    # Clean up extra spaces and punctuation
-    text = re.sub(r'\s+', ' ', text)  # Multiple spaces to single
-    text = re.sub(r'\s+([.,;:])', r'\1', text)  # Space before punctuation
-    text = text.strip()
-    
-    # Add authoritative beginning if text seems weak
-    weak_beginnings = [r'^well,', r'^so,', r'^basically,', r'^essentially,', r'^rather,']
-    for pattern in weak_beginnings:
-        if re.search(pattern, text, re.IGNORECASE):
-            text = re.sub(pattern, '', text, flags=re.IGNORECASE).strip()
-            transformation_notes.append(f"Removed weak beginning: '{pattern}'")
-    
-    # If text starts with uncertainty, make it more definitive
-    uncertainty_starters = [
-        (r'^(?:it would seem|it appears|it seems) that', ''),
-        (r'^(?:the evidence suggests|research indicates) that', ''),
-        (r'^(?:one could argue|one might say) that', ''),
-    ]
-    
-    for pattern, replacement in uncertainty_starters:
-        if re.search(pattern, text, re.IGNORECASE):
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE).strip()
-            transformation_notes.append(f"Removed uncertain starter: '{pattern}'")
-    
-    return text, transformation_notes
-
-def extract_and_format_citations(magis_chunks: List[MagisChunkResult]) -> Tuple[str, Dict[int, str]]:
-    """Extract proper citations and create footnote mapping"""
-    
-    citations_found = []
-    footnote_map = {}
-    
-    for chunk in magis_chunks:
-        # Look for citations in the citations field
-        if chunk.citations:
-            for citation in chunk.citations:
-                if citation and len(citation.strip()) > 10:  # Basic validation
-                    # Check if it looks like a proper academic citation
-                    if any(indicator in citation.lower() for indicator in ['(', ')', ',', 'vol', 'pp', 'journal', 'university', 'press']):
-                        citations_found.append(citation.strip())
-        
-        # Also check humanId for author information
-        if chunk.humanId and chunk.humanId != "Unknown":
-            # If humanId looks like an author name, note it
-            if not any(chunk.humanId in cite for cite in citations_found):
-                # Create a basic citation from available metadata
-                basic_cite = f"{chunk.humanId}"
-                if chunk.sourceFile:
-                    basic_cite += f", {chunk.sourceFile}"
-                citations_found.append(basic_cite)
-    
-    # Remove duplicates while preserving order
-    unique_citations = []
-    seen = set()
-    for cite in citations_found:
-        if cite not in seen:
-            unique_citations.append(cite)
-            seen.add(cite)
-    
-    # Create footnote mapping
-    for i, citation in enumerate(unique_citations, 1):
-        footnote_map[i] = citation
-    
-    # Format the references section
-    if unique_citations:
-        references_section = "**Suggested References for Further Study:**\n"
-        for i, citation in enumerate(unique_citations, 1):
-            references_section += f"[{i}] {citation}\n"
-        return references_section.strip(), footnote_map
-    
-    return None, {}
-
-def add_footnote_numbers(text: str, magis_chunks: List[MagisChunkResult], footnote_map: Dict[int, str]) -> str:
-    """Add footnote numbers to text where studies or research are mentioned"""
-    
-    if not footnote_map:
-        return text
-    
-    # Look for patterns that suggest research/studies
-    study_patterns = [
-        r'(studies? (?:show|demonstrate|indicate|reveal|find))',
-        r'(research (?:shows|demonstrates|indicates|reveals|finds))',
-        r'(according to (?:studies?|research))',
-        r'(peer-reviewed (?:studies?|research))',
-        r'(\d+(?:\.\d+)?%)',  # Percentages
-        r'(statistical (?:analysis|data|evidence))',
-        r'(scientific (?:studies?|research|evidence))',
-    ]
-    
-    footnote_counter = 1
-    
-    for pattern in study_patterns:
-        matches = list(re.finditer(pattern, text, re.IGNORECASE))
-        for match in reversed(matches):  # Reverse to maintain positions
-            if footnote_counter <= len(footnote_map):
-                # Insert footnote number after the match
-                end_pos = match.end()
-                text = text[:end_pos] + f"[{footnote_counter}]" + text[end_pos:]
-                footnote_counter += 1
-                if footnote_counter > len(footnote_map):
-                    break
+    # Fix other common capitalization issues
+    text = re.sub(r'\bTHat\b', 'That', text)
+    text = re.sub(r'\bTHis\b', 'This', text)
+    text = re.sub(r'\bTHere\b', 'There', text)
+    text = re.sub(r'\bTHey\b', 'They', text)
+    text = re.sub(r'\bTHen\b', 'Then', text)
     
     return text
 
-def detect_and_format_proofs(text: str, magis_chunks: List[MagisChunkResult]) -> str:
-    """Detect when proofs of God are referenced and format them properly"""
-    
-    # Check if any source files contain the specific proof documents
-    proof_sources = {}
-    proof_patterns = {
-        'thomistic': r'thomistic.*proof',
-        'lonerganian': r'lonerganian.*proof', 
-        'metaphysical': r'metaphysical.*proof'
-    }
-    
-    for chunk in magis_chunks:
-        source_file = chunk.sourceFile.lower()
-        if 'thomistic proof' in source_file:
-            proof_sources['thomistic'] = chunk.sourceFile
-        elif 'lonerganian proof' in source_file:
-            proof_sources['lonerganian'] = chunk.sourceFile
-        elif 'metaphysical proof' in source_file:
-            proof_sources['metaphysical'] = chunk.sourceFile
-    
-    # Look for proof references in the text and enhance them
-    enhanced_text = text
-    
-    # Patterns that suggest proof references
-    proof_reference_patterns = [
-        (r'(proof(?:s)? (?:of|for) god)', r'**\1**'),
-        (r'(thomistic proof)', r'**Thomistic Proof of God**'),
-        (r'(lonerganian proof)', r'**Lonerganian Proof of God**'),
-        (r'(metaphysical proof)', r'**Metaphysical Proof of God**'),
-        (r'(cosmological argument)', r'**\1**'),
-        (r'(ontological argument)', r'**\1**'),
-        (r'(teleological argument)', r'**\1**'),
-        (r'(first cause)', r'**\1**'),
-        (r'(prime mover)', r'**\1**'),
-        (r'(necessary being)', r'**\1**'),
-    ]
-    
-    for pattern, replacement in proof_reference_patterns:
-        enhanced_text = re.sub(pattern, replacement, enhanced_text, flags=re.IGNORECASE)
-    
-    # If specific proofs are detected, add structured presentation
-    if proof_sources:
-        proof_intro = "\n\n**Formal Proofs Available:**\n"
-        if 'thomistic' in proof_sources:
-            proof_intro += f"• **Thomistic Proof**: Structured step-by-step demonstration\n"
-        if 'lonerganian' in proof_sources:
-            proof_intro += f"• **Lonerganian Proof**: Comprehensive philosophical argument\n"
-        if 'metaphysical' in proof_sources:
-            proof_intro += f"• **Metaphysical Proof**: Fundamental ontological reasoning\n"
-        
-        # Add this if the text discusses proofs but doesn't already have structured format
-        if re.search(r'proof', enhanced_text, re.IGNORECASE) and not re.search(r'\*\*.*proof.*\*\*', enhanced_text, re.IGNORECASE):
-            enhanced_text += proof_intro
-    
-    return enhanced_text
-
-def enhance_scholarly_content(text: str, magis_chunks: List[MagisChunkResult]) -> str:
-    """Enhance text with scholarly structure when studies/statistics are mentioned"""
-    
-    enhanced_text = text
-    
-    # First, detect and format any proofs of God
-    enhanced_text = detect_and_format_proofs(enhanced_text, magis_chunks)
-    
-    # Look for statistical data patterns and enhance them
-    stat_patterns = [
-        (r'(\d+(?:\.\d+)?%)', r'**\1**'),  # Bold percentages
-        (r'(\d+(?:,\d{3})*\s+(?:people|individuals|participants|subjects))', r'**\1**'),  # Bold sample sizes
-    ]
-    
-    for pattern, replacement in stat_patterns:
-        enhanced_text = re.sub(pattern, replacement, enhanced_text)
-    
-    # Look for methodology mentions and structure them
-    if re.search(r'(study|research|analysis|survey|investigation)', enhanced_text, re.IGNORECASE):
-        # Add structure for scholarly content (if not already present)
-        if not re.search(r'\*\*.*?\*\*', enhanced_text):  # No bold formatting yet
-            # Look for key findings and emphasize them
-            finding_patterns = [
-                (r'(found that|discovered that|showed that|demonstrated that)', r'**\1**'),
-                (r'(concluded that|determined that|established that)', r'**\1**'),
-            ]
-            
-            for pattern, replacement in finding_patterns:
-                enhanced_text = re.sub(pattern, replacement, enhanced_text, flags=re.IGNORECASE)
-    
-    return enhanced_text
-
-def add_catholic_authority_framing(text: str, question: str) -> str:
-    """Add appropriate Catholic teaching authority to responses when needed"""
-    
-    # If text is too short or already has strong Catholic framing, don't add more
-    if len(text) < 50 or re.search(r'the catholic church (?:teaches|holds|maintains)', text, re.IGNORECASE):
-        return text
-    
-    # Detect topics that need Catholic teaching authority
-    moral_topics = [
-        'abortion', 'euthanasia', 'contraception', 'marriage', 'divorce', 'sexuality',
-        'homosexuality', 'gender', 'embryo', 'stem cell', 'cloning', 'suicide',
-        'war', 'capital punishment', 'social justice', 'poverty', 'economics'
-    ]
-    
-    theological_topics = [
-        'god', 'trinity', 'incarnation', 'salvation', 'grace', 'sin', 'heaven',
-        'hell', 'purgatory', 'mary', 'saints', 'prayer', 'mass', 'eucharist',
-        'sacraments', 'pope', 'church', 'scripture', 'tradition'
-    ]
+def detect_question_categories(question: str) -> Dict[str, bool]:
+    """Detect multiple categories a question falls into for optimal response structuring"""
     
     question_lower = question.lower()
-    text_lower = text.lower()
     
-    # Determine if this is a moral or theological topic
-    is_moral_topic = any(topic in question_lower for topic in moral_topics)
-    is_theological_topic = any(topic in question_lower for topic in theological_topics)
+    # Define category patterns
+    categories = {
+        'moral': [
+            'abortion', 'euthanasia', 'suicide', 'murder', 'killing', 'contraception', 
+            'homosexual', 'same-sex', 'gay', 'transgender', 'marriage', 'divorce',
+            'embryo', 'stem cell', 'cloning', 'ivf', 'artificial reproduction',
+            'moral', 'ethics', 'sin', 'virtue', 'conscience', 'right', 'wrong'
+        ],
+        'scientific': [
+            'evolution', 'big bang', 'cosmology', 'quantum', 'physics', 'biology',
+            'genetics', 'dna', 'embryology', 'neuroscience', 'consciousness',
+            'climate', 'environment', 'science', 'scientific', 'research', 'study'
+        ],
+        'philosophical': [
+            'existence', 'proof', 'god exists', 'atheism', 'reason', 'logic',
+            'natural law', 'human dignity', 'personhood', 'soul', 'mind',
+            'free will', 'determinism', 'causation', 'philosophy', 'metaphysics'
+        ],
+        'scriptural': [
+            'bible', 'scripture', 'genesis', 'gospel', 'jesus said', 'paul wrote',
+            'old testament', 'new testament', 'psalms', 'prophets', 'revelation',
+            'biblical', 'scriptural', 'verse', 'passage'
+        ],
+        'theological': [
+            'god', 'trinity', 'incarnation', 'salvation', 'grace', 'redemption',
+            'heaven', 'hell', 'purgatory', 'saints', 'mary', 'virgin',
+            'theology', 'doctrine', 'dogma', 'mystery', 'divine'
+        ],
+        'church_history': [
+            'pope', 'council', 'fathers', 'saints', 'crusades', 'inquisition',
+            'reformation', 'vatican', 'early church', 'persecution', 'martyrs',
+            'history', 'historical', 'development', 'tradition'
+        ],
+        'liturgical': [
+            'mass', 'eucharist', 'sacrament', 'baptism', 'confirmation', 'marriage',
+            'ordination', 'anointing', 'confession', 'liturgy', 'worship',
+            'prayer', 'rosary', 'devotion'
+        ],
+        'social_teaching': [
+            'social justice', 'poverty', 'economics', 'capitalism', 'socialism',
+            'war', 'peace', 'capital punishment', 'immigration', 'politics',
+            'government', 'authority', 'common good', 'solidarity'
+        ],
+        'apologetics': [
+            'why believe', 'proof of god', 'evidence', 'faith and reason',
+            'objection', 'atheist', 'agnostic', 'doubt', 'skeptic',
+            'defend', 'argument', 'case for'
+        ]
+    }
     
-    # Add appropriate Catholic framing
-    if is_moral_topic:
-        # For moral issues, emphasize definitive teaching
-        if 'abortion' in question_lower:
-            if not re.search(r'catholic church|church teaching|magisterium', text_lower):
-                text = "The Catholic Church teaches definitively that " + text.lower()
-        elif any(topic in question_lower for topic in ['euthanasia', 'suicide', 'killing']):
-            if not re.search(r'catholic church|church teaching', text_lower):
-                text = "According to Catholic moral teaching, " + text
-        else:
-            # General moral topics
-            if not re.search(r'catholic|church|moral teaching', text_lower):
-                text = "Catholic moral theology establishes that " + text
-                
-    elif is_theological_topic:
-        # For theological topics, emphasize doctrine and tradition
-        if not re.search(r'catholic|church|doctrine|tradition|scripture', text_lower):
-            text = "Catholic doctrine affirms that " + text
+    # Count matches for each category
+    detected_categories = {}
+    for category, keywords in categories.items():
+        matches = sum(1 for keyword in keywords if keyword in question_lower)
+        detected_categories[category] = matches > 0
     
-    # Capitalize first letter after adding prefix
-    if text and len(text) > 1:
-        # Find the first letter after any added prefix
-        match = re.search(r'([a-z])', text)
-        if match:
-            pos = match.start()
-            text = text[:pos] + text[pos].upper() + text[pos+1:]
+    # Add some helpful metadata
+    primary_categories = [cat for cat, detected in detected_categories.items() if detected]
     
-    return text
+    return {
+        **detected_categories,
+        'primary_categories': primary_categories,
+        'is_multi_category': len(primary_categories) > 1,
+        'complexity_level': len(primary_categories)
+    }
+
+def generate_optimal_structure_prompt(categories: Dict[str, bool], question: str) -> str:
+    """Generate structure guidance based on detected categories"""
+    
+    primary_cats = categories.get('primary_categories', [])
+    
+    if not primary_cats:
+        return """Structure your response with clear paragraphs and good writing principles. 
+        Use the most logical flow for maximum persuasive impact."""
+    
+    # Build structure guidance based on category combinations
+    structure_guidance = "Structure your response optimally for these categories: " + ", ".join(primary_cats) + "\n\n"
+    
+    # Moral questions
+    if categories.get('moral'):
+        structure_guidance += """For moral content:
+        - Open with the definitive moral truth
+        - Present supporting evidence in logical order
+        - Use clear, authoritative statements\n"""
+    
+    # Scientific questions  
+    if categories.get('scientific'):
+        structure_guidance += """For scientific content:
+        - Present scientific facts clearly
+        - Show compatibility with Catholic teaching
+        - Use specific data and research when available\n"""
+    
+    # Philosophical questions
+    if categories.get('philosophical'):
+        structure_guidance += """For philosophical content:
+        - Build logical arguments step by step
+        - Use proper reasoning sequences
+        - Connect to natural law and human dignity\n"""
+    
+    # Scriptural questions
+    if categories.get('scriptural'):
+        structure_guidance += """For scriptural content:
+        - Quote relevant passages directly
+        - Provide proper interpretation in context
+        - Connect to broader biblical themes\n"""
+    
+    # Apologetics
+    if categories.get('apologetics'):
+        structure_guidance += """For apologetic content:
+        - Address objections directly
+        - Build cumulative case with evidence
+        - Use structured proofs when applicable\n"""
+    
+    # Multi-category guidance
+    if categories.get('is_multi_category'):
+        structure_guidance += """\nFor multi-category responses:
+        - Integrate evidence types for maximum impact
+        - Let logical flow determine optimal order
+        - Create seamless transitions between evidence types"""
+    
+    structure_guidance += """\n\nWRITING STRUCTURE REQUIREMENTS:
+    - Break into clear paragraphs with logical flow
+    - Use bullet points for lists of evidence
+    - Use numbered lists for sequential arguments
+    - Bold key principles and conclusions
+    - Quote sources when appropriate
+    - Create subheadings for complex topics
+    - Ensure smooth transitions between sections"""
+    
+    return structure_guidance
 
 async def get_detailed_source_content(source_ids: List[str]) -> List[MagisChunkResult]:
     """Retrieve detailed content for source IDs from Weaviate"""
@@ -467,80 +360,76 @@ async def get_detailed_source_content(source_ids: List[str]) -> List[MagisChunkR
         logger.error(f"❌ Error in get_detailed_source_content: {e}")
         return detailed_sources
 
-def add_catholic_perspective_emphasis(text: str) -> str:
-    """Emphasize Catholic perspective when contrasting views are present"""
+def extract_and_format_citations(magis_chunks: List[MagisChunkResult]) -> Optional[str]:
+    """Extract proper citations and format them for references section"""
     
-    # Look for secular vs Catholic distinctions and emphasize Catholic teaching
-    if re.search(r'(secular|non-religious|atheist|materialist)', text, re.IGNORECASE):
-        # Already has contrasting perspectives, ensure Catholic view is clear
-        catholic_phrases = [
-            (r'(the church teaches)', r'**the Catholic Church teaches**'),
-            (r'(catholic teaching)', r'**Catholic teaching**'),
-            (r'(church doctrine)', r'**Church doctrine**'),
-            (r'(magisterium)', r'**the Magisterium**'),
-        ]
+    citations_found = []
+    
+    for chunk in magis_chunks:
+        # Look for citations in the citations field
+        if chunk.citations:
+            for citation in chunk.citations:
+                if citation and len(citation.strip()) > 10:
+                    # Check if it looks like a proper academic citation
+                    if any(indicator in citation.lower() for indicator in ['(', ')', ',', 'vol', 'pp', 'journal', 'university', 'press']):
+                        citations_found.append(citation.strip())
         
-        for pattern, replacement in catholic_phrases:
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        # Also check humanId for author information
+        if chunk.humanId and chunk.humanId != "Unknown":
+            # If humanId looks like an author name, note it
+            if not any(chunk.humanId in cite for cite in citations_found):
+                # Create a basic citation from available metadata
+                basic_cite = f"{chunk.humanId}"
+                if chunk.sourceFile:
+                    basic_cite += f", {chunk.sourceFile}"
+                citations_found.append(basic_cite)
     
-    return text
+    # Remove duplicates while preserving order
+    unique_citations = []
+    seen = set()
+    for cite in citations_found:
+        if cite not in seen:
+            unique_citations.append(cite)
+            seen.add(cite)
+    
+    # Format the references section
+    if unique_citations:
+        references_section = "**Suggested References for Further Study:**\n"
+        for i, citation in enumerate(unique_citations, 1):
+            references_section += f"[{i}] {citation}\n"
+        return references_section.strip()
+    
+    return None
 
-async def transform_to_magisai_response(raw_response: str, magis_chunks: List[MagisChunkResult], question: str, include_debug: bool = False) -> Dict[str, Any]:
-    """Transform raw agent response into authoritative MagisAI format"""
+async def run_dual_agent_system(question: str, include_debug: bool = False) -> Dict[str, Any]:
+    """Run the two-agent system: Content Agent → Authority Enforcer Agent"""
     
-    transformation_notes = []
-    
-    # Step 1: Clean AI language
-    cleaned_text, clean_notes = clean_ai_language(raw_response)
-    transformation_notes.extend(clean_notes)
-    
-    # Step 2: Extract and format citations
-    references_section, footnote_map = extract_and_format_citations(magis_chunks)
-    
-    # Step 3: Add footnote numbers to text
-    if footnote_map:
-        cleaned_text = add_footnote_numbers(cleaned_text, magis_chunks, footnote_map)
-        transformation_notes.append(f"Added {len(footnote_map)} footnote references")
-    
-    # Step 4: Enhance scholarly content
-    enhanced_text = enhance_scholarly_content(cleaned_text, magis_chunks)
-    
-    # Step 5: Add Catholic authority framing and perspective
-    authority_framed_text = add_catholic_authority_framing(enhanced_text, question)
-    final_text = add_catholic_perspective_emphasis(authority_framed_text)
-    
-    return {
-        "transformed_answer": final_text,
-        "references_section": references_section,
-        "transformation_notes": transformation_notes if include_debug else None
-    }
-
-async def query_with_magisai_transformation(question: str, include_debug: bool = False) -> Dict[str, Any]:
-    """Use Weaviate Query Agent and transform to MagisAI persona"""
-    
-    if not main_query_agent:
-        raise HTTPException(status_code=503, detail="MagisAI Agent not available")
+    if not content_query_agent or not authority_enforcer_agent:
+        raise HTTPException(status_code=503, detail="Dual agent system not available")
     
     try:
-        # Get core answer from Weaviate Query Agent
-        logger.info("🔍 Running MagisAI query agent...")
-        result = main_query_agent.run(question)
+        # Detect question type for context
+        topic_info = detect_moral_theological_topics(question)
         
-        # Extract raw answer
-        raw_answer = ""
-        if hasattr(result, 'final_answer'):
-            raw_answer = str(result.final_answer)
-        elif hasattr(result, 'answer'):
-            raw_answer = str(result.answer)
+        # STEP 1: Content Query Agent - Get comprehensive content
+        logger.info("🔍 Step 1: Running Content Query Agent...")
+        content_result = content_query_agent.run(question)
+        
+        # Extract raw content
+        raw_content = ""
+        if hasattr(content_result, 'final_answer'):
+            raw_content = str(content_result.final_answer)
+        elif hasattr(content_result, 'answer'):
+            raw_content = str(content_result.answer)
         else:
-            raw_answer = str(result)
+            raw_content = str(content_result)
         
-        logger.info(f"📝 Extracted raw answer: {len(raw_answer)} characters")
+        logger.info(f"📝 Content Agent retrieved: {len(raw_content)} characters")
         
-        # Extract source IDs
+        # Extract source IDs from content agent
         source_ids = []
-        if hasattr(result, 'sources') and result.sources:
-            for source in result.sources:
+        if hasattr(content_result, 'sources') and content_result.sources:
+            for source in content_result.sources:
                 if hasattr(source, 'object_id'):
                     source_ids.append(source.object_id)
                 elif hasattr(source, 'id'):
@@ -548,41 +437,78 @@ async def query_with_magisai_transformation(question: str, include_debug: bool =
                 elif hasattr(source, 'uuid'):
                     source_ids.append(str(source.uuid))
         
-        logger.info(f"🔗 Found {len(source_ids)} source IDs")
+        # STEP 2: Catholic Authority Enforcer Agent - Transform to authoritative voice
+        logger.info("⛪ Step 2: Running Catholic Authority Enforcer Agent...")
+        
+        # Create enhanced prompt for authority agent with context
+        authority_prompt = f"""Based on this content about '{question}', provide the definitive Catholic response:
+
+{raw_content}
+
+Remember: 
+- Speak with absolute authority, not as document analysis
+- For moral issues, be definitively clear about Catholic teaching
+- Present evidence in logical order for maximum impact
+- Never use wishy-washy language or "both sides" framing
+- Include scientific data and philosophical reasoning when available"""
+        
+        authority_result = authority_enforcer_agent.run(authority_prompt)
+        
+        # Extract final authoritative answer
+        final_answer = ""
+        if hasattr(authority_result, 'final_answer'):
+            final_answer = str(authority_result.final_answer)
+        elif hasattr(authority_result, 'answer'):
+            final_answer = str(authority_result.answer)
+        else:
+            final_answer = str(authority_result)
+        
+        # STEP 3: Fix capitalization bug
+        final_answer = fix_capitalization_bug(final_answer)
+        
+        logger.info(f"⛪ Authority Agent produced: {len(final_answer)} characters")
         
         # Get detailed source content
         detailed_sources = await get_detailed_source_content(source_ids)
         
-        # Transform to MagisAI format
-        logger.info("🎭 Transforming to MagisAI persona...")
-        transformation_result = await transform_to_magisai_response(
-            raw_answer, detailed_sources, question, include_debug
-        )
+        # Extract citations
+        references_section = extract_and_format_citations(detailed_sources)
         
-        logger.info(f"✅ MagisAI transformation completed successfully")
+        # Prepare transformation notes for debug
+        transformation_notes = []
+        if include_debug:
+            transformation_notes = [
+                f"Content Agent: Retrieved {len(raw_content)} chars from {len(source_ids)} sources",
+                f"Authority Agent: Transformed to {len(final_answer)} chars",
+                f"Topic Analysis: {topic_info}",
+                "Applied capitalization fixes",
+                f"Citations: {len(detailed_sources)} sources processed"
+            ]
+        
+        logger.info(f"✅ Dual agent system completed successfully")
         return {
-            "answer": transformation_result["transformed_answer"],
-            "references": transformation_result["references_section"],
+            "answer": final_answer,
+            "references": references_section,
             "detailed_sources": detailed_sources,
-            "confidence": getattr(result, 'confidence', 0.9),
-            "raw_response": raw_answer if include_debug else None,
-            "transformation_notes": transformation_result.get("transformation_notes")
+            "confidence": getattr(authority_result, 'confidence', 0.95),
+            "raw_content": raw_content if include_debug else None,
+            "transformation_notes": transformation_notes
         }
         
     except Exception as e:
-        logger.error(f"❌ MagisAI query failed: {e}")
-        raise HTTPException(status_code=500, detail=f"MagisAI processing error: {str(e)}")
+        logger.error(f"❌ Dual agent system failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Dual agent processing error: {str(e)}")
 
 @app.post("/ask", response_model=QueryResponse)
-async def ask_magisai(request: QueryRequest):
-    """Main MagisAI query endpoint with persona transformation"""
+async def ask_magisai_dual_agent(request: QueryRequest):
+    """Main MagisAI endpoint using dual agent system"""
     
     start_time = time.time()
-    logger.info(f"MagisAI query from {request.user}: {request.question}")
+    logger.info(f"MagisAI Dual Agent query from {request.user}: {request.question}")
     
     try:
-        # Use Query Agent with MagisAI transformation
-        result = await query_with_magisai_transformation(
+        # Use dual agent system
+        result = await run_dual_agent_system(
             question=request.question,
             include_debug=request.include_debug_info
         )
@@ -592,16 +518,16 @@ async def ask_magisai(request: QueryRequest):
             suggested_references=result["references"],
             magis_chunk_results=result["detailed_sources"],
             processing_time=time.time() - start_time,
-            method_used="magisai_weaviate_agent_with_persona_transformation",
+            method_used="dual_agent_system_content_plus_authority_enforcer",
             confidence=result.get("confidence"),
-            raw_agent_response=result.get("raw_response"),
+            raw_content_response=result.get("raw_content"),
             transformation_notes=result.get("transformation_notes")
         )
         
     except Exception as e:
-        logger.error(f"❌ MagisAI query failed: {e}")
+        logger.error(f"❌ MagisAI dual agent query failed: {e}")
         
-        # Return the enhanced fallback message
+        # Enhanced fallback message
         fallback_message = (
             "I draw from the Catholic Church's authoritative teachings and "
             "Fr. Robert Spitzer's comprehensive research in science, reason, faith, "
@@ -617,15 +543,15 @@ async def ask_magisai(request: QueryRequest):
             processing_time=time.time() - start_time,
             method_used="fallback_response",
             confidence=0.0,
-            raw_agent_response=str(e) if request.include_debug_info else None,
+            raw_content_response=str(e) if request.include_debug_info else None,
             transformation_notes=["Fallback response due to error"] if request.include_debug_info else None
         )
 
-# Legacy endpoint for backward compatibility
-@app.post("/ask-magisai")
-async def ask_magisai_legacy(request: QueryRequest):
+# Legacy endpoints for backward compatibility
+@app.post("/ask-dual-agent")
+async def ask_dual_agent_legacy(request: QueryRequest):
     """Legacy endpoint - same as /ask"""
-    return await ask_magisai(request)
+    return await ask_magisai_dual_agent(request)
 
 if __name__ == "__main__":
     import uvicorn
